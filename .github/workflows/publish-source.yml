@@ -18,9 +18,9 @@ jobs:
           git remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
           git fetch --quiet --no-tags origin main
           git switch --quiet --detach FETCH_HEAD
-          echo "1ff4c8dbd74a23ab700d0fdee4d8701723fe3d90a00e63eb65a3047789c58208  SetuVPN-1.19.bundle" | sha256sum --check
-          git fetch --quiet --no-tags "$PWD/SetuVPN-1.19.bundle" refs/heads/main:refs/heads/source-import
-          test "$(git rev-parse refs/heads/source-import^{tree})" = 457dc9b30d8801a11037ef256fdd2773bbf58949
+          echo "16a437f6e9463602170de047c93477042cedcf4c08e45b65630a8ed1182fb4c6  SetuVPN-1.19-publish.bundle" | sha256sum --check
+          git fetch --quiet --no-tags "$PWD/SetuVPN-1.19-publish.bundle" refs/heads/main:refs/heads/source-import
+          test "$(git rev-parse refs/heads/source-import^{tree})" = 72dc5639a1f2f14e074f4caabfc8c1bde26fdf9a
           workflow=.github/workflows/publish-source.yml
           git show "HEAD:$workflow" > "$RUNNER_TEMP/publish-source.yml"
           git read-tree --reset -u refs/heads/source-import
