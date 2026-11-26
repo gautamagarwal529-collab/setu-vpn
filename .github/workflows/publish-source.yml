@@ -1,0 +1,32 @@
+name: Publish Setu VPN source
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Commit the verified source tree
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git init --quiet "$RUNNER_TEMP/setu-vpn"
+          cd "$RUNNER_TEMP/setu-vpn"
+          git remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
+          git fetch --quiet --no-tags origin main
+          git switch --quiet --detach FETCH_HEAD
+          echo "1ff4c8dbd74a23ab700d0fdee4d8701723fe3d90a00e63eb65a3047789c58208  SetuVPN-1.19.bundle" | sha256sum --check
+          git fetch --quiet --no-tags "$PWD/SetuVPN-1.19.bundle" refs/heads/main:refs/heads/source-import
+          test "$(git rev-parse refs/heads/source-import^{tree})" = 457dc9b30d8801a11037ef256fdd2773bbf58949
+          workflow=.github/workflows/publish-source.yml
+          git show "HEAD:$workflow" > "$RUNNER_TEMP/publish-source.yml"
+          git read-tree --reset -u refs/heads/source-import
+          mkdir -p "$(dirname "$workflow")"
+          cp "$RUNNER_TEMP/publish-source.yml" "$workflow"
+          git add -- "$workflow"
+          git diff --cached --exit-code refs/heads/source-import -- . ":(exclude)$workflow"
+          git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -qm "Publish the Setu VPN GPLv2 source"
+          git -c credential.helper= -c credential.helper="!gh auth git-credential" push origin HEAD:refs/heads/main
