@@ -2,8 +2,6 @@ package com.paperline.vpn;
 
 import android.content.Context;
 import android.util.AtomicFile;
-import android.util.Base64;
-import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
@@ -14,13 +12,11 @@ import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.time.Instant;
 import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -102,6 +98,7 @@ final class VpnDirectory {
     static final class Relay {
         String country;
         String ip;
+        int address;
         String host;
         int ping;
         int probePort;
@@ -118,13 +115,13 @@ final class VpnDirectory {
         String profileHash;
         String inline;
 
-        boolean reachable() {
-            return "reachable".equals(tcp) && tcpChecked > System.currentTimeMillis() - 18 * HOUR;
+        boolean reachable(long now) {
+            return "reachable".equals(tcp) && tcpChecked > now - 18 * HOUR;
         }
 
         String caption() {
             String metric = speed >= 1_000_000 ? String.format(Locale.US,"%.0f Mbps reported", speed / 1_000_000.0) : "Volunteer relay";
-            if (reachable()) return "TCP answered · " + metric;
+            if (reachable(System.currentTimeMillis())) return "TCP answered · " + metric;
             if (current) return "Recently listed · " + metric;
             long hours = Math.max(1, (System.currentTimeMillis() - lastSeen) / HOUR);
             return hours < 48 ? "Listed " + hours + " h ago · " + metric
@@ -140,17 +137,9 @@ final class VpnDirectory {
         int total;
         List<Relay> best = Collections.emptyList();
 
-        void populate(List<Relay> rows) {
-            Map<String,Relay> unique = new LinkedHashMap<>();
-            rows.sort(Comparator.<Relay>comparingInt(r -> r.reachable() ? 0 : r.current ? 1 : 2)
-                    .thenComparing(Comparator.comparingLong((Relay r) -> r.lastSeen / (3 * HOUR)).reversed())
-                    .thenComparing(Comparator.comparingLong((Relay r) -> r.score).reversed()));
-            for (Relay relay : rows) {
-                if (unique.putIfAbsent(relay.country + "/" + relay.ip, relay) != null) continue;
-                countries.computeIfAbsent(relay.country, code -> new ArrayList<>()).add(relay);
-            }
-            best = new ArrayList<>(unique.values());
-            total = best.size();
+        void add(Relay relay) {
+            best.add(relay);
+            countries.computeIfAbsent(relay.country, code -> new ArrayList<>()).add(relay);
         }
     }
 
@@ -175,7 +164,7 @@ final class VpnDirectory {
 
     Edition starter() {
         try (InputStream input = context.getAssets().open("paperline-starter.json")) {
-            return readEdition(new JSONObject(utf8(read(input,512_000))));
+            return readEdition(read(input,512_000));
         } catch (Exception error) {
             android.util.Log.w("PaperlineDirectory","Could not read the starter directory",error);
             return new Edition();
@@ -190,7 +179,7 @@ final class VpnDirectory {
         Edition disk = readCache(cache);
         Edition bundled;
         try (InputStream input = context.getAssets().open("paperline-directory.json")) {
-            bundled = readEdition(new JSONObject(utf8(read(input,MAX_POOL))));
+            bundled = readEdition(read(input,MAX_POOL));
         } catch (Exception error) {
             android.util.Log.w("PaperlineDirectory","Could not read the packaged directory",error);
             bundled = new Edition();
@@ -202,7 +191,7 @@ final class VpnDirectory {
 
     private static Edition readCache(AtomicFile file) {
         try (InputStream input = file.openRead()) {
-            return readEdition(new JSONObject(utf8(read(input,MAX_POOL))));
+            return readEdition(read(input,MAX_POOL));
         } catch (Exception ignored) {
             return new Edition();
         }
@@ -216,7 +205,10 @@ final class VpnDirectory {
         combined.version = pool.version + "+" + snapshot.version;
         List<Relay> rows = new ArrayList<>(pool.best);
         rows.addAll(snapshot.best);
-        combined.populate(rows);
+        List<Relay> ordered = RustCore.order(rows,true,false,"",0);
+        combined.best = new ArrayList<>(ordered.size());
+        for (Relay relay : ordered) combined.add(relay);
+        combined.total = combined.best.size();
         return combined;
     }
 
@@ -227,9 +219,10 @@ final class VpnDirectory {
             byte[] csv = fetch("https://www.vpngate.net/api/iphone/",4 * 1024 * 1024,4200);
             JSONObject document = new JSONObject().put("paperline_csv",utf8(csv))
                     .put("source_fetched_at",Instant.now().toString());
-            Edition next = readEdition(document);
+            byte[] cacheData = utf8(document.toString());
+            Edition next = readEdition(cacheData);
             if (next.total == 0) throw new IOException("VPN Gate returned an empty list");
-            persist(csvCache,utf8(document.toString()));
+            persist(csvCache,cacheData);
             official = next;
         } catch (Exception unavailable) {
             failure = unavailable;
@@ -260,13 +253,21 @@ final class VpnDirectory {
         JSONObject file = index.getJSONObject("files").getJSONObject("pool/servers.json");
         byte[] manifest = verified(commit,"pool/servers.json",file.getString("sha256"),
                 file.getInt("bytes"),MAX_POOL);
-        JSONObject data = new JSONObject(utf8(manifest));
-        if (data.getInt("schema_version") != 1) throw new IOException("Unknown server format");
-        data.put("paperline_commit",commit);
-        Edition edition = readEdition(data);
+        Edition edition = RustCore.readDirectory(manifest,commit,System.currentTimeMillis());
         if (edition.total == 0) throw new IOException("Empty server catalog");
-        persist(cache,utf8(data.toString()));
+        persist(cache,withCommit(manifest,commit));
         return edition;
+    }
+
+    private static byte[] withCommit(byte[] json,String commit) throws IOException {
+        int first = 0;
+        while (first < json.length && json[first] <= ' ' && json[first] > 0) first++;
+        if (first == json.length || json[first] != '{') throw new IOException("Invalid relay catalog");
+        byte[] header = utf8("{\"paperline_commit\":\"" + commit + "\",");
+        byte[] result = new byte[header.length + json.length - first - 1];
+        System.arraycopy(header,0,result,0,header.length);
+        System.arraycopy(json,first + 1,result,header.length,json.length - first - 1);
+        return result;
     }
 
     private static void persist(AtomicFile file, byte[] data) throws IOException {
@@ -280,106 +281,21 @@ final class VpnDirectory {
         }
     }
 
-    static Edition readEdition(JSONObject document) throws Exception {
-        Edition edition = new Edition();
-        edition.sourceTime = timestamp(document.optString("source_fetched_at"));
-        long now = System.currentTimeMillis();
-        if (edition.sourceTime <= now - 7 * 24 * HOUR) return edition;
-        List<Relay> result = new ArrayList<>();
-        if (document.has("paperline_csv")) {
-            edition.fromCsv = true;
-            String feed = document.getString("paperline_csv");
-            edition.version = digest(utf8(feed)).substring(0,8);
-            for (String line : feed.split("\\r?\\n")) {
-                if (line.startsWith("#") || line.startsWith("*")) continue;
-                List<String> fields = csv(line);
-                if (fields.size() != 15) continue;
-                Relay relay = new Relay();
-                relay.host = fields.get(0);
-                relay.ip = fields.get(1);
-                relay.country = fields.get(6);
-                relay.ping = (int) number(fields.get(3));
-                relay.score = number(fields.get(2));
-                relay.speed = number(fields.get(4));
-                relay.inline = fields.get(14);
-                relay.lastSeen = edition.sourceTime;
-                relay.current = edition.sourceTime > now - 18 * HOUR;
-                if (valid(relay) && !relay.inline.isEmpty()) result.add(relay);
-            }
-        } else {
-            String commit = document.getString("paperline_commit");
-            if (!commit.matches("[a-f0-9]{40}")) throw new IOException("Invalid catalog version");
-            edition.version = commit.substring(0,8);
-            JSONArray servers = document.getJSONArray("servers");
-            for (int i = 0; i < servers.length(); i++) {
-                JSONObject s = servers.optJSONObject(i);
-                if (s == null) continue;
-                Relay r = new Relay();
-                r.ip = s.optString("ip");
-                r.host = s.optString("hostname");
-                r.country = s.isNull("country_code") ? "XX" : s.optString("country_code");
-                r.lastSeen = timestamp(s.optString("last_seen_at"));
-                r.ping = s.optInt("ping_ms");
-                r.probePort = publicTcpPort(s,r.ip);
-                r.speed = s.optLong("speed_bps");
-                r.score = s.optLong("score");
-                r.current = s.optBoolean("present_in_latest_source") && edition.sourceTime > now - 18 * HOUR;
-                JSONObject tcp = s.optJSONObject("tcp_probe");
-                if (tcp != null) {
-                    r.tcp = tcp.optString("status");
-                    r.tcpChecked = timestamp(tcp.optString("checked_at"));
-                }
-                if (!valid(r) || r.lastSeen < now - 7 * 24 * HOUR
-                        || (!r.current && "unreachable".equals(r.tcp) && r.tcpChecked > now - 16 * HOUR)) continue;
-                JSONObject config = s.optJSONObject("config");
-                if (config == null) continue;
-                r.commit = commit;
-                r.path = config.optString("path");
-                r.jsonHash = config.optString("sha256");
-                r.jsonLength = config.optInt("bytes");
-                r.profileHash = s.optString("openvpn_config_sha256");
-                if (r.profileHash.matches("[a-f0-9]{64}") && r.path.equals("pool/configs/" + r.profileHash + ".json")) result.add(r);
-            }
-        }
-        edition.populate(result);
-        return edition;
-    }
-
-    private static int publicTcpPort(JSONObject row,String ip) {
-        if (!"tcp".equals(row.optString("probe_reason"))) return 0;
-        JSONArray targets = row.optJSONArray("probe_targets");
-        if (targets == null) return 0;
-        for (int i = 0; i < targets.length(); i++) {
-            JSONObject target = targets.optJSONObject(i);
-            if (target == null || !ip.equals(target.optString("ip"))) continue;
-            int port = target.optInt("port");
-            if (port > 0 && port <= 65535) return port;
-        }
-        return 0;
+    private static Edition readEdition(byte[] data) throws IOException {
+        return RustCore.readDirectory(data,null,System.currentTimeMillis());
     }
 
     String profile(Relay relay) throws Exception {
-        byte[] profile;
-        if (relay.inline != null) {
-            profile = Base64.decode(relay.inline, Base64.DEFAULT);
-        } else {
-            byte[] bytes = bundledProfile(relay);
-            if (bytes == null) bytes = verified(relay.commit, relay.path, relay.jsonHash, relay.jsonLength, 160_000, 3200);
-            JSONObject file = new JSONObject(utf8(bytes));
-            if (file.getInt("schema_version") != 1 || !"vpngate-pool-config".equals(file.getString("kind")))
-                throw new IOException("Unsupported relay profile");
-            profile = Base64.decode(file.getString("openvpn_config_base64"), Base64.DEFAULT);
-            if (profile.length != file.getInt("openvpn_config_bytes") ||
-                    !digest(profile).equals(relay.profileHash)) throw new IOException("Relay profile changed");
-        }
-        if (profile.length > MAX_PROFILE) throw new IOException("Profile is too large");
-        return ProfileRules.clean(utf8(profile), relay.ip);
+        if (relay.inline != null) return RustCore.verifyProfile(utf8(relay.inline),null,relay.ip);
+        byte[] bytes = bundledProfile(relay);
+        if (bytes == null) bytes = verified(relay.commit,relay.path,relay.jsonHash,relay.jsonLength,160_000,3200);
+        return RustCore.verifyProfile(bytes,relay.profileHash,relay.ip);
     }
 
     private byte[] bundledProfile(Relay relay) throws Exception {
         try (InputStream input = context.getAssets().open("paperline-quick/" + relay.profileHash + ".json")) {
             byte[] bytes = read(input,160_000);
-            if (bytes.length == relay.jsonLength && digest(bytes).equals(relay.jsonHash)) return bytes;
+            if (bytes.length == relay.jsonLength && RustCore.sha256(bytes).equals(relay.jsonHash)) return bytes;
         } catch (IOException ignored) {
             // An unbundled relay is retrieved from its published snapshot.
         }
@@ -395,7 +311,7 @@ final class VpnDirectory {
         for (String prefix : Arrays.asList(CDN + commit + "/", RAW + commit + "/")) {
             try {
                 byte[] bytes = fetch(prefix + path, size,timeout);
-                if (bytes.length == size && digest(bytes).equals(hash)) return bytes;
+                if (bytes.length == size && RustCore.sha256(bytes).equals(hash)) return bytes;
             } catch (IOException ignored) {
                 // The alternate host serves the same pinned content.
             }
@@ -406,7 +322,7 @@ final class VpnDirectory {
     static String pakistanProfile(int number) throws IOException {
         if (number != 1 && number != 2) throw new IOException("Unknown server");
         String profile = utf8(fetch("https://www.vpnjantit.com/download-openvpn.php?server=pk" + number,MAX_PROFILE,4000));
-        return ProfileRules.provider(profile,"pk" + number + ".vpnjantit.com");
+        return RustCore.cleanProfile(profile,"pk" + number + ".vpnjantit.com",true);
     }
 
     private static byte[] fetch(String url, int limit) throws IOException {
@@ -418,7 +334,7 @@ final class VpnDirectory {
         connection.setConnectTimeout(Math.min(6000,timeout));
         connection.setReadTimeout(timeout);
         connection.setInstanceFollowRedirects(false);
-        connection.setRequestProperty("User-Agent", "SetuVPN/1.19");
+        connection.setRequestProperty("User-Agent", "SetuVPN/1.20");
         try {
             if (connection.getResponseCode() != 200) throw new IOException("Directory server unavailable");
             try (InputStream input = connection.getInputStream()) {
@@ -441,47 +357,11 @@ final class VpnDirectory {
         return result.toByteArray();
     }
 
-    private static String digest(byte[] data) throws Exception {
-        byte[] hash = MessageDigest.getInstance("SHA-256").digest(data);
-        StringBuilder result = new StringBuilder(64);
-        for (byte value : hash) result.append(String.format(Locale.US, "%02x", value & 255));
-        return result.toString();
-    }
-
     static String utf8(byte[] value) { return new String(value, StandardCharsets.UTF_8); }
     static byte[] utf8(String value) { return value.getBytes(StandardCharsets.UTF_8); }
     static long timestamp(String value) {
         if (value == null || value.isEmpty()) return 0;
         try { return Instant.parse(value).toEpochMilli(); }
         catch (DateTimeParseException ignored) { return 0; }
-    }
-
-    private static boolean valid(Relay r) {
-        return r.country.matches("[A-Z]{2}") && ProfileRules.publicV4(r.ip);
-    }
-
-    private static long number(String s) {
-        try { return Math.max(0,Long.parseLong(s)); }
-        catch (NumberFormatException ignored) { return 0; }
-    }
-
-    private static List<String> csv(String line) {
-        List<String> result = new ArrayList<>();
-        StringBuilder field = new StringBuilder();
-        boolean quoted = false;
-        for (int p = 0; p < line.length(); p++) {
-            char c = line.charAt(p);
-            if (c == '"') {
-                if (quoted && p+1 < line.length() && line.charAt(p+1) == '"') {
-                    field.append('"');
-                    p++;
-                } else quoted = !quoted;
-            } else if (c == ',' && !quoted) {
-                result.add(field.toString());
-                field.setLength(0);
-            } else field.append(c);
-        }
-        result.add(field.toString());
-        return result;
     }
 }

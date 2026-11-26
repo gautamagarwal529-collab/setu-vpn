@@ -6,13 +6,18 @@ Setu VPN is an Android OpenVPN client with a country-based directory of public r
 
 ## Build from source
 
-Install OpenJDK 21, Gradle 9.7.1, SWIG, Android SDK Platform 37, Android NDK 30.0.14904198, and Android SDK CMake. Set `ANDROID_HOME` to the Android SDK installation. From the repository root, run the release task.
+Install OpenJDK 21, Gradle 9.7.1, SWIG, Rust 1.88 or newer with Cargo, Android SDK Platform 37, Android NDK 30.0.14904198, and Android SDK CMake. Set `ANDROID_HOME` to the Android SDK installation. Install Rust targets for the four Android ABIs and run the release task from the repository root.
 
 ```sh
+rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-android x86_64-linux-android
 gradle :main:assembleUiOvpn23Release
 ```
 
-The unsigned APK is written to `main/build/outputs/apk/uiOvpn23/release/`. The project compiles the Java, Kotlin, and native OpenVPN components together. The Android application ID is `com.paperline.vpn`. The release version is 1.19, with version code 20.
+The unsigned APK is written to `main/build/outputs/apk/uiOvpn23/release/`. The project compiles the Rust core, Android Java/Kotlin components, and native OpenVPN engine together. The Android application ID is `com.paperline.vpn`. The release version is 1.20, with version code 21.
+
+## Rust core
+
+The Rust core parses and deduplicates relay catalogs, validates OpenVPN profiles, verifies relay hashes, and orders Quick Connect attempts. It sends each sorted catalog to Android in one binary buffer. Android handles UI, storage, notifications, and VPN permissions. The OpenVPN engine handles protocol negotiation and traffic. Run the core tests on a desktop with `cargo test --locked --manifest-path rust-core/Cargo.toml`.
 
 ## Source and licensing
 
@@ -36,13 +41,13 @@ The listing text and artwork are under `fastlane/metadata/android/en-US`. The dr
 
 ## Signed GitHub release
 
-The downloadable APK uses the same Setu app source and the pinned F-Droid OpenVPN for Android 0.7.69 engine. The release packaging script is in `release-build/build.sh`. It takes Android SDK Platform 35's `android.jar`, Android Build Tools 35.0.0, ECJ 3.39.0, the verified `de.blinkt.openvpn_225.apk`, the bundled directory JSON, and an output APK path. The script checks the engine APK's SHA-256 and defaults to an unsigned build for local use.
+The downloadable APK uses the same Setu app source and the pinned F-Droid OpenVPN for Android 0.7.69 engine. The release packaging script is in `release-build/build.sh`. It takes Android SDK Platform 35's `android.jar`, Android Build Tools 35.0.0, ECJ 3.39.0, the verified `de.blinkt.openvpn_225.apk`, the bundled directory JSON, the Android NDK directory, and an output APK path. The script checks the engine APK's SHA-256 and defaults to an unsigned build for local use.
 
 ```sh
 ./release-build/build.sh /path/to/android.jar /path/to/build-tools/35.0.0 /path/to/ecj.jar \
-    /path/to/de.blinkt.openvpn_225.apk main/src/main/assets/paperline-directory.json SetuVPN-1.19.apk
+    /path/to/de.blinkt.openvpn_225.apk main/src/main/assets/paperline-directory.json /path/to/ndk SetuVPN-1.20.apk
 ```
 
-To sign with your own keystore, set `PAPERLINE_KEYSTORE`, `PAPERLINE_KEYSTORE_PASSWORD`, and `PAPERLINE_KEY_ALIAS`. The public release uses the original Setu VPN signing key to support updates over 1.18.
+To sign with your own keystore, set `PAPERLINE_KEYSTORE`, `PAPERLINE_KEYSTORE_PASSWORD`, and `PAPERLINE_KEY_ALIAS`. The public release uses the original Setu VPN signing key to support updates over 1.19.
 
 [OpenVPN for Android builds](https://f-droid.org/packages/de.blinkt.openvpn/)

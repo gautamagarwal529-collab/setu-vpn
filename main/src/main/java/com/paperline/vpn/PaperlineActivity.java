@@ -1145,9 +1145,8 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         String previous = global ? getPreferences(MODE_PRIVATE).getString(LAST_GLOBAL_COUNTRY,"") : "";
         session.rankedEdition = snapshot;
         profileTask = work.submit(() -> {
-            List<VpnDirectory.Relay> ranked = QuickConnectOrder.rank(servers,tried);
-            List<VpnDirectory.Relay> ordered = global
-                    ? QuickConnectOrder.rotateCountries(ranked,previous,ThreadLocalRandom.current()) : ranked;
+            List<VpnDirectory.Relay> ordered = QuickConnectOrder.rank(
+                    servers,tried,global,previous,ThreadLocalRandom.current().nextLong());
             try {
                 if (global) QuickConnectOrder.measureFirstCountry(ordered);
                 else QuickConnectOrder.measureLatency(ordered);

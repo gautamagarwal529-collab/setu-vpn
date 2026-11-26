@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ $# != 6 ]]; then
-    echo "Usage: $0 android.jar build-tools-dir ecj.jar base.apk directory.json output.apk"
+if [[ $# != 7 ]]; then
+    echo "Usage: $0 android.jar build-tools-dir ecj.jar base.apk directory.json android-ndk-dir output.apk"
     exit 2
 fi
 platform="$(realpath "$1")"
@@ -9,7 +9,8 @@ tools_dir="$(realpath "$2")"
 ecj="$(realpath "$3")"
 base="$(realpath "$4")"
 directory="$(realpath "$5")"
-output="$(realpath -m "$6")"
+ndk="$(realpath "$6")"
+output="$(realpath -m "$7")"
 cd -- "$(dirname -- "$0")"
 expected_base=6d2d6dc8b84bd3c6628427d8dee5139eb48bd729d4a97442b441187e9899f698
 printf '%s  %s\n' "$expected_base" "$base" | sha256sum -c
@@ -34,7 +35,8 @@ round_icon=re.search(r':roundIcon\(.*?\)=@(0x[0-9a-f]+)',tree).group(1)
 dialog=re.search(r':theme\(.*?\)=@(0x[0-9a-f]+)\n.*CredentialsPopup',tree).group(1)
 (p/'framework-refs.txt').write_text(f'{icon} {round_icon} {dialog}')
 PY
-python3 package_apk.py "$base" "$build/shell.apk" "$build/dex/classes.dex" "$directory" "$build/icon.apk" "$build/unsigned.apk"
+bash ../rust-core/build-android.sh "$ndk" "$build/jni"
+python3 package_apk.py "$base" "$build/shell.apk" "$build/dex/classes.dex" "$directory" "$build/icon.apk" "$build/jni" "$build/unsigned.apk"
 "$tools_dir/zipalign" -P 16 -f 4 "$build/unsigned.apk" "$build/aligned.apk"
 if [[ -z "${PAPERLINE_KEYSTORE:-}" ]]; then
     cp "$build/aligned.apk" "$output"

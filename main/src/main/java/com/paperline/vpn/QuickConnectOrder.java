@@ -3,17 +3,12 @@ package com.paperline.vpn;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.Iterator;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutorService;
@@ -22,55 +17,17 @@ import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 final class QuickConnectOrder {
-    private static final String INDIA = "IN";
-    private static final int INDIA_FIRST_ODDS = 25;
     private static final int PROBE_COUNT = 8;
     private static final int PROBE_TIMEOUT_MS = 900;
     private static final int NO_RESPONSE = Integer.MAX_VALUE;
 
-    static List<VpnDirectory.Relay> rank(List<VpnDirectory.Relay> source, Set<String> tried) {
-        long recent = System.currentTimeMillis() - 18 * VpnDirectory.HOUR;
-        List<VpnDirectory.Relay> ranked = new ArrayList<>();
-        for (VpnDirectory.Relay relay : source) if (!tried.contains(relay.ip)) ranked.add(relay);
-
-        ranked.sort(Comparator.<VpnDirectory.Relay>comparingInt(relay ->
-                        "reachable".equals(relay.tcp) && relay.tcpChecked > recent ? 0 : relay.current ? 1 : 2)
-                .thenComparingInt(relay -> relay.ping > 0 ? relay.ping : Integer.MAX_VALUE)
-                .thenComparing(Comparator.comparingLong((VpnDirectory.Relay relay) -> relay.speed).reversed())
-                .thenComparing(Comparator.comparingLong((VpnDirectory.Relay relay) -> relay.lastSeen).reversed()));
-
-        Set<String> unique = new HashSet<>();
-        ranked.removeIf(relay -> !unique.add(relay.ip));
-        return ranked;
-    }
-
-    static List<VpnDirectory.Relay> rotateCountries(List<VpnDirectory.Relay> ranked,String previous,Random random) {
-        Map<String,ArrayDeque<VpnDirectory.Relay>> byCountry = new LinkedHashMap<>();
-        for (VpnDirectory.Relay relay : ranked) {
-            byCountry.computeIfAbsent(relay.country,code -> new ArrayDeque<>()).addLast(relay);
+    static List<VpnDirectory.Relay> rank(List<VpnDirectory.Relay> source,Set<String> tried,
+                                         boolean global,String previous,long seed) {
+        List<VpnDirectory.Relay> candidates = new ArrayList<>(source.size());
+        for (VpnDirectory.Relay relay : source) {
+            if (!tried.contains(relay.ip)) candidates.add(relay);
         }
-        ArrayDeque<VpnDirectory.Relay> india = byCountry.remove(INDIA);
-        if (byCountry.isEmpty()) return new ArrayList<>(ranked);
-
-        List<ArrayDeque<VpnDirectory.Relay>> shuffled = new ArrayList<>(byCountry.values());
-        Collections.shuffle(shuffled,random);
-        if (shuffled.size() > 1 && shuffled.get(0).peekFirst().country.equals(previous)) {
-            Collections.swap(shuffled,0,1 + random.nextInt(shuffled.size() - 1));
-        }
-
-        List<VpnDirectory.Relay> order = new ArrayList<>(ranked.size());
-        if (india != null && !INDIA.equals(previous) && random.nextInt(INDIA_FIRST_ODDS) == 0) {
-            order.add(india.removeFirst());
-        }
-        // Give each international location a turn before trying its next relay.
-        ArrayDeque<ArrayDeque<VpnDirectory.Relay>> countries = new ArrayDeque<>(shuffled);
-        while (!countries.isEmpty()) {
-            ArrayDeque<VpnDirectory.Relay> relays = countries.removeFirst();
-            order.add(relays.removeFirst());
-            if (!relays.isEmpty()) countries.addLast(relays);
-        }
-        if (india != null) order.addAll(india);
-        return order;
+        return RustCore.order(candidates,false,global,previous,seed);
     }
 
     static void measureFirstCountry(List<VpnDirectory.Relay> order) throws InterruptedException {

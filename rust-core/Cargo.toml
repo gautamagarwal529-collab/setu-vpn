@@ -1,0 +1,21 @@
+[package]
+name = "setu-core"
+version = "1.20.0"
+edition = "2021"
+rust-version = "1.88"
+license = "GPL-2.0-only"
+description = "Relay directory and profile logic for Setu VPN"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+jni = "0.21"
+serde_json = "1"
+sha2 = "0.10"
+
+[profile.release]
+lto = "thin"
+strip = "symbols"

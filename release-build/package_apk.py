@@ -1,11 +1,11 @@
 """Keep the official 0.7.69 OpenVPN engine intact and add Setu VPN's app shell."""
 from pathlib import Path
 from struct import pack_into, unpack_from
-from zipfile import ZipFile, ZIP_DEFLATED
+from zipfile import ZipFile, ZIP_DEFLATED, ZIP_STORED
 import re
 import sys
 
-base, shell, dex, directory, icon, result = map(Path, sys.argv[1:])
+base, shell, dex, directory, icon, jni, result = map(Path, sys.argv[1:])
 with ZipFile(shell) as source:
     manifest = bytearray(source.read("AndroidManifest.xml"))
 
@@ -76,3 +76,6 @@ with ZipFile(base) as original, ZipFile(icon) as icon_archive, ZipFile(result, "
     quick = assets / "paperline-quick"
     for profile in sorted(quick.glob("*.json")):
         output.write(profile, "assets/paperline-quick/" + profile.name, ZIP_DEFLATED)
+    for abi_directory in sorted(jni.iterdir()):
+        output.write(abi_directory / "libsetu_core.so",
+                     f"lib/{abi_directory.name}/libsetu_core.so", ZIP_STORED)

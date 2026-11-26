@@ -36,8 +36,8 @@ android {
         minSdk = 26
         targetSdk = 35
         //targetSdkPreview = "UpsideDownCake"
-        versionCode = 20
-        versionName = "1.19"
+        versionCode = 21
+        versionName = "1.20"
         externalNativeBuild {
             cmake {
                 //arguments+= "-DCMAKE_VERBOSE_MAKEFILE=1"
@@ -144,6 +144,25 @@ android {
     }
 }
 
+abstract class BuildSetuRustCore : Exec() {
+    @get:OutputDirectory
+    abstract val outputDir: DirectoryProperty
+}
+
+val setuRustCore = tasks.register<BuildSetuRustCore>("buildSetuRustCore") {
+    val rustSource = rootProject.layout.projectDirectory.dir("rust-core")
+    inputs.dir(rustSource.dir("src"))
+    inputs.files(rustSource.file("Cargo.toml"), rustSource.file("Cargo.lock"), rustSource.file("build-android.sh"))
+    outputDir.set(layout.buildDirectory.dir("generated/setuRustCore"))
+    environment("CARGO_TARGET_DIR", layout.buildDirectory.dir("setu-cargo").get().asFile.absolutePath)
+    doFirst {
+        val ndk = providers.environmentVariable("ANDROID_NDK_HOME").orNull
+            ?: androidComponents.sdkComponents.ndkDirectory.get().asFile.absolutePath
+        commandLine("bash", rustSource.file("build-android.sh").asFile.absolutePath,
+            ndk, outputDir.get().asFile.absolutePath)
+    }
+}
+
 var swigcmd = "swig"
 // Workaround for macOS(arm64) and macOS(intel) since it otherwise does not find swig and
 // I cannot get the Exec task to respect the PATH environment :(
@@ -196,6 +215,7 @@ androidComponents {
     onVariants(selector().all()) { variant ->
         val execTask = registerGenSwigTask(variant.name, variant.name.replace("-", "/"))
         variant.sources.java?.addGeneratedSourceDirectory(execTask, GenerateSwigTask::outputDir)
+        variant.sources.jniLibs?.addGeneratedSourceDirectory(setuRustCore, BuildSetuRustCore::outputDir)
     }
 }
 

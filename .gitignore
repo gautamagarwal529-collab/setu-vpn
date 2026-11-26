@@ -37,3 +37,5 @@ test.local.conf
 /main/local.properties
 *.jks
 *.keystore
+
+/rust-core/target/

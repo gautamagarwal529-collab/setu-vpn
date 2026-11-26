@@ -55,6 +55,6 @@ final class OpenVpnFiles {
                 .replaceAll("[\\p{Cntrl}]","").trim();
         if (name.isEmpty()) name = "Imported profile";
         if (name.length() > 75) name = name.substring(0,75);
-        return new Profile(name,ProfileRules.clean(VpnDirectory.utf8(bytes),null));
+        return new Profile(name,RustCore.cleanProfile(VpnDirectory.utf8(bytes),null,false));
     }
 }
