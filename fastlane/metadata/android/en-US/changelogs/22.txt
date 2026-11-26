@@ -1,0 +1,1 @@
+Quick Connect learns which relays work on Wi-Fi and mobile data. Save favorites, reconnect from history, and view connection details. Settings adds auto-reconnect, split tunneling, and Android kill-switch setup. Import WireGuard .conf files alongside OpenVPN profiles.

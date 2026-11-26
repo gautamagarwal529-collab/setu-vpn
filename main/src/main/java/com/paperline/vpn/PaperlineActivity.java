@@ -11,6 +11,7 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -30,7 +31,9 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.provider.OpenableColumns;
+import android.provider.Settings;
 import android.text.Editable;
 import android.text.InputType;
 import android.text.TextWatcher;
@@ -127,6 +130,18 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
     private final LruCache<String, Bitmap> countryIcons = new LruCache<>(96);
     private Typeface actionTypeface;
     private VpnDirectory directory;
+    private ConnectionHistory history;
+    private VpnOptions options;
+    private ConnectionHistory.Entry endpoint;
+    private String attemptNetwork = "other", resumeConfig;
+    private long connectedAt, wireRequest;
+    private Imported pendingWireGuard;
+    private boolean wireGuard, supervisedReconnect, restoring;
+    private boolean successfulAttempt, attemptRecorded;
+    private int reconnectCount;
+    private String lastError = "";
+    private final Runnable wireChanges = this::onWireGuardChanged;
+    private final Runnable reconnect = this::resumeOpenVpn;
     private VpnDirectory.Edition edition = new VpnDirectory.Edition();
     private LinearLayout locations;
     private GlassTheme theme;
@@ -161,8 +176,13 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         @Override public void onServiceDisconnected(ComponentName name) {
             vpn = null;
             if (stopping) clearStopped();
-            else if (started && quick != null) clearStopped();
-            else if (started) fail("The VPN service stopped. Try connecting again.");
+            else if (started && quick != null) {
+                lastError = "The OpenVPN service stopped.";
+                message = "Trying another server… " + lastError;
+                recordFailure();
+                clearStopped();
+            }
+            else if (started && !wireGuard) connectionLost("The OpenVPN service stopped.");
         }
     };
 
@@ -190,6 +210,8 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             ArrayList<String> open = saved.getStringArrayList("expanded");
             if (open != null) expanded.addAll(open);
         }
+        history = new ConnectionHistory(this);
+        options = new VpnOptions(this);
         directory = new VpnDirectory(this);
         edition = directory.starter();
         displayName = getPreferences(MODE_PRIVATE).getString("last_name", "");
@@ -218,10 +240,13 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
     @Override protected void onStart() {
         super.onStart();
         foreground = true;
+        SetuVpnService.listen(wireChanges);
+        onWireGuardChanged();
         VpnStatus.addStateListener(this);
         bindController();
         statusBound = bindService(new Intent(this,OpenVPNStatusService.class), statusConnection, Context.BIND_AUTO_CREATE);
         advanceQuickConnect();
+        if (supervisedReconnect && !started && !stopping && profileTask == null) scheduleReconnect();
         animateConnectionMeter();
     }
 
@@ -233,6 +258,8 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
 
     @Override protected void onStop() {
         foreground = false;
+        SetuVpnService.unlisten(wireChanges);
+        main.removeCallbacks(reconnect);
         animateConnectionMeter();
         VpnStatus.removeStateListener(this);
         unbindController();
@@ -353,6 +380,11 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         detail.setGravity(Gravity.CENTER);
         words.addView(detail);
         card.addView(words,new LinearLayout.LayoutParams(-1,-2));
+        TextView detailsButton = actionLabel("Connection details",13,theme.accent);
+        detailsButton.setGravity(Gravity.CENTER);
+        detailsButton.setMinimumHeight(dp(44));
+        detailsButton.setOnClickListener(this::showConnectionDetails);
+        card.addView(detailsButton,new LinearLayout.LayoutParams(-1,-2));
 
         gap(card,11);
         meter = new ConnectionMeter();
@@ -390,6 +422,17 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             return true;
         });
         sheet.setFocusableInTouchMode(true);
+        LinearLayout shortcuts = row();
+        TextView favorites = actionLabel("Favorites",14,theme.accent);
+        TextView recent = actionLabel("Recent",14,theme.accent);
+        for (TextView shortcut : new TextView[]{favorites,recent}) {
+            shortcut.setGravity(Gravity.CENTER);
+            shortcut.setMinimumHeight(dp(46));
+            shortcuts.addView(shortcut,weighted());
+        }
+        favorites.setOnClickListener(view -> showSaved(true,view));
+        recent.setOnClickListener(view -> showSaved(false,view));
+        sheet.addView(shortcuts,new LinearLayout.LayoutParams(-1,-2));
         sheet.addView(search,new LinearLayout.LayoutParams(-1,dp(50)));
         sheet.requestFocus();
         gap(sheet,12);
@@ -695,7 +738,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
 
     private void populateCountryPanel(CountryPanel children,String code,String name,List<VpnDirectory.Relay> entries,
                                       List<Imported> local,View heading) {
-        boolean canQuickConnect = !entries.isEmpty() || local.stream().anyMatch(profile -> !profile.needsLogin());
+        boolean canQuickConnect = !entries.isEmpty() || local.stream().anyMatch(profile -> !profile.needsLogin() && !profile.wireGuard);
         if (!code.isEmpty() && (canQuickConnect || ownsCountryAction(code))) {
             TextView toggle = button("Quick Connect",true);
             toggle.setOnClickListener(view -> countryQuickAction(code,view));
@@ -707,8 +750,9 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             renderCountryAction(code,toggle);
         }
         for (Imported profile : local) {
-            LinearLayout tile = addTile(children, profile.name, "Imported OpenVPN profile", "Connect",
+            ServerTile tile = (ServerTile)addTile(children,profile.name,"Imported " + profile.protocol() + " profile","Connect",
                     view -> connectImport(profile,view));
+            tile.favorite(profile.entry());
             tile.setOnLongClickListener(v -> { deleteImport(profile,v); return true; });
         }
         if ("PK".equals(code)) {
@@ -727,7 +771,8 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             for (int i = 0; i < limit; i++) {
                 VpnDirectory.Relay relay = entries.get(i);
                 String label = relayLabel(code,name,i);
-                addTile(children,label,relay.caption(),"Connect",view -> connectRelay(relay,label,view));
+                ServerTile tile = (ServerTile)addTile(children,label,relay.caption(),"Connect",view -> connectRelay(relay,label,view));
+                tile.favorite(ConnectionHistory.Entry.relay(relay,label));
             }
             if (entries.size() > limit) {
                 TextView more = button(String.format(Locale.getDefault(),"Show all %,d servers",entries.size()),false);
@@ -763,7 +808,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
     }
 
     private final class ServerTile extends LinearLayout {
-        private final TextView title, subtitle, action;
+        private final TextView title, subtitle, action, star;
 
         ServerTile(String verb) {
             super(PaperlineActivity.this);
@@ -777,9 +822,24 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             descriptions.addView(title);
             descriptions.addView(subtitle);
             addView(descriptions,weighted());
+            star = actionLabel("☆",22,theme.accent);
+            star.setGravity(Gravity.CENTER);
+            star.setVisibility(View.GONE);
+            addView(star,new LinearLayout.LayoutParams(dp(43),dp(46)));
             action = button(verb,false);
             action.setMinimumWidth(dp(75));
             addView(action);
+        }
+
+        void favorite(ConnectionHistory.Entry entry) {
+            star.setVisibility(View.VISIBLE);
+            updateStar(entry,history.favorite(entry.id));
+            star.setOnClickListener(view -> updateStar(entry,history.toggleFavorite(entry)));
+        }
+
+        private void updateStar(ConnectionHistory.Entry entry,boolean saved) {
+            star.setText(saved ? "★" : "☆");
+            star.setContentDescription((saved ? "Remove favorite " : "Favorite ") + entry.name);
         }
 
         void bind(String name,String caption,Consumer<View> click) {
@@ -867,6 +927,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
                     VpnDirectory.Relay relay = entries.get(index);
                     String label = relayLabel(country,name,index);
                     tile.bind(label,relay.caption(),view -> connectRelay(relay,label,view));
+                    tile.favorite(ConnectionHistory.Entry.relay(relay,label));
                     int childIndex = 0;
                     while (childIndex < visibleRows.size() && visibleRows.keyAt(childIndex) < index) childIndex++;
                     addViewInLayout(tile,childIndex,new ViewGroup.LayoutParams(-1,rowHeight),true);
@@ -921,10 +982,23 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         rule(preferences,theme.divider,1,0);
         Switch countries = settingsSwitch(preferences,"Show all countries",allCountries);
         countries.setOnCheckedChangeListener((button,checked) -> setAllCountries(checked));
+        rule(preferences,theme.divider,1,0);
+        Switch recovery = settingsSwitch(preferences,"Auto-reconnect",options.autoReconnect());
+        recovery.setOnCheckedChangeListener((button,checked) -> {
+            options.setAutoReconnect(checked);
+            if (!checked && supervisedReconnect) {
+                cancelReconnect();
+                stop("Auto-reconnect canceled.");
+            }
+        });
+        rule(preferences,theme.divider,1,0);
+        settingsAction(preferences,"Split tunneling",this::showSplitTunneling);
+        rule(preferences,theme.divider,1,0);
+        settingsAction(preferences,"Kill switch",this::showKillSwitch);
 
         gap(content,10);
         LinearLayout actions = settingsCard(content);
-        settingsAction(actions,"Import OpenVPN profile or ZIP",view -> {
+        settingsAction(actions,"Import OpenVPN or WireGuard profile",view -> {
             DialogMorph.Origin origin = DialogMorph.origin(view);
             chooseImportCountry(origin);
         });
@@ -1054,6 +1128,17 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
 
     private void heroAction(View view) {
         if (quick != null || connected || busy || started || stopping) {
+            cancelReconnect();
+            SavedConnection.clear(this);
+            if (wireGuard || pendingWireGuard != null) {
+                quick = null;
+                pendingWireGuard = null;
+                awaitingPermission = false;
+                SetuVpnService.disconnect(this);
+                wireGuard = false;
+                clearStopped();
+                return;
+            }
             quick = null;
             if (stopping) {
                 message = "Disconnected";
@@ -1062,7 +1147,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             return;
         }
         List<Imported> ready = new ArrayList<>(imported);
-        ready.removeIf(Imported::needsLogin);
+        ready.removeIf(profile -> profile.needsLogin() || profile.wireGuard);
         QuickSession session = new QuickSession(null,ready);
         if (edition.best.isEmpty() && !ready.isEmpty()) startQuickConnect(session);
         else withPublicRelayNotice("Quick Connect",view,() -> startQuickConnect(session));
@@ -1080,7 +1165,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         }
         if (connectionInProgress()) return;
         List<Imported> ready = importsFor(code);
-        ready.removeIf(Imported::needsLogin);
+        ready.removeIf(profile -> profile.needsLogin() || profile.wireGuard);
         QuickSession session = new QuickSession(code,ready);
         String name = VpnDirectory.name(code);
         if (!session.servers(edition).isEmpty()) {
@@ -1115,7 +1200,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             List<VpnDirectory.Relay> country = session.rankedEdition.countries.get(relay.country);
             int number = country.indexOf(relay) + ("PK".equals(relay.country) ? 3 : 1);
             String name = VpnDirectory.name(relay.country) + " " + number;
-            loadProfile(name,relay.country,"","",() -> directory.profile(relay),"Couldn’t load this server.",null);
+            loadRelay(relay,name);
             return;
         }
         VpnDirectory.Edition snapshot = edition;
@@ -1144,12 +1229,14 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         boolean global = session.country == null;
         String previous = global ? getPreferences(MODE_PRIVATE).getString(LAST_GLOBAL_COUNTRY,"") : "";
         session.rankedEdition = snapshot;
+        String network = ConnectionHistory.network(this);
         profileTask = work.submit(() -> {
+            Map<String,Integer> health = history.relayScores(network,System.currentTimeMillis());
             List<VpnDirectory.Relay> ordered = QuickConnectOrder.rank(
-                    servers,tried,global,previous,ThreadLocalRandom.current().nextLong());
+                    servers,tried,global,previous,ThreadLocalRandom.current().nextLong(),health);
             try {
-                if (global) QuickConnectOrder.measureFirstCountry(ordered);
-                else QuickConnectOrder.measureLatency(ordered);
+                if (global) QuickConnectOrder.measureFirstCountry(ordered,health);
+                else QuickConnectOrder.measureLatency(ordered,health);
             }
             catch (InterruptedException interrupted) {
                 Thread.currentThread().interrupt();
@@ -1167,8 +1254,12 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
     private void connectRelay(VpnDirectory.Relay relay,String name,View view) {
         if (connectionInProgress()) return;
         withPublicRelayNotice("Connect to " + VpnDirectory.name(relay.country) + "?",view,() ->
-                loadProfile(name,relay.country,"","",() -> directory.profile(relay),
-                        "Couldn’t load this server. Try another one.",null));
+                loadRelay(relay,name));
+    }
+
+    private void loadRelay(VpnDirectory.Relay relay,String name) {
+        loadProfile(ConnectionHistory.Entry.relay(relay,name),"","",() -> directory.profile(relay),
+                "Couldn’t load this relay’s profile.",null);
     }
 
     private void withPublicRelayNotice(String title,View view,Runnable connect) {
@@ -1216,7 +1307,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
                 toast("Enter your VPN username and password.");
                 return;
             }
-            closeDialog(dialog,origin,() -> loadProfile("Pakistan " + server,"PK",user,secret,
+            closeDialog(dialog,origin,() -> loadProfile(new ConnectionHistory.Entry("provider:PK:" + server,"Pakistan " + server,"PK","OpenVPN"),user,secret,
                     () -> VpnDirectory.pakistanProfile(server),"Couldn’t load the Pakistan profile.",
                     () -> showPakistanImport(server)));
         });
@@ -1232,22 +1323,31 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
 
     private interface ProfileLoader { String load() throws Exception; }
 
-    private void loadProfile(String name,String country,String username,String password,ProfileLoader loader,
+    private void loadProfile(ConnectionHistory.Entry entry,String username,String password,ProfileLoader loader,
                              String errorText,Runnable onError) {
-        int attempt = begin(name,country);
+        endpoint = entry;
+        int attempt = begin(entry.name,entry.country);
+        attemptNetwork = ConnectionHistory.network(this);
+        successfulAttempt = false;
+        if (!restoring) connectedAt = 0;
+        attemptRecorded = false;
+        if (!restoring) resumeConfig = null;
         profileTask = work.submit(() -> {
             try {
-                VpnProfile profile = makeProfile(loader.load(),name,username);
+                String config = loader.load();
+                VpnProfile profile = makeProfile(config,entry.name,username);
                 main.post(() -> {
                     if (active(attempt)) {
                         profileTask = null;
+                        if (username.isEmpty() && password.isEmpty() && !usesLogin(config)) resumeConfig = config;
                         prepare(profile,password);
                     }
                 });
             } catch (Exception error) {
                 main.post(() -> {
                     if (active(attempt)) {
-                        attemptFailed(errorText);
+                        attemptFailed(error instanceof java.net.SocketTimeoutException
+                                ? "The profile download timed out." : errorText);
                         if (onError != null) onError.run();
                     }
                 });
@@ -1337,6 +1437,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         waitingForEngine = false;
         try {
             if (!password.isEmpty()) engineStatus.setCachedPassword(profile.getUUIDString(),PasswordCache.AUTHPASSWORD,password);
+            options.apply(profile);
             ProfileManager.setTemporaryProfile(this,profile);
             getPreferences(MODE_PRIVATE).edit().putString("last_name",displayName)
                     .putString("last_country",displayCountry).apply();
@@ -1366,9 +1467,19 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
     }
 
     private void attemptFailed(String reason) {
-        if (quick != null) stop("Trying another server…");
+        lastError = reason;
+        recordFailure();
+        if (quick != null) stop("Trying another server… " + reason);
+        else if (supervisedReconnect || restoring) connectionLost(reason);
         else if (started || connected) stop(reason);
         else fail(reason);
+    }
+
+    private void recordFailure() {
+        if (!successfulAttempt && !attemptRecorded && endpoint != null && !"other".equals(attemptNetwork)) {
+            attemptRecorded = true;
+            history.record(endpoint,attemptNetwork,false);
+        }
     }
 
     private void cancelProfileTask() {
@@ -1426,11 +1537,14 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         busy = quick != null;
         started = false;
         connected = false;
+        if (!supervisedReconnect) connectedAt = 0;
         startedObserved = false;
         activeProfileId = null;
         if (quick != null) {
-            message = "Trying another server…";
             main.post(this::advanceQuickConnect);
+        } else if (supervisedReconnect) {
+            busy = true;
+            scheduleReconnect();
         } else if ("Disconnected".equals(message)) message = "";
         renderState();
     }
@@ -1447,23 +1561,26 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         stopping = false;
         started = false;
         connected = false;
+        connectedAt = 0;
         message = text;
+        if (!text.isEmpty()) lastError = text;
         renderState();
     }
 
     @Override public void updateState(String raw,String log,int id,ConnectionStatus level,Intent intent) {
         String reportedProfile = VpnStatus.getLastConnectedVPNProfile();
         main.post(() -> {
-            if (isDestroyed()) return;
+            if (isDestroyed() || wireGuard || pendingWireGuard != null) return;
             if (stopping) {
                 // EXITING can arrive before OpenVPN's native process releases the service.
-                if (level == ConnectionStatus.LEVEL_NOTCONNECTED && (quick == null || "NOPROCESS".equals(raw)))
+                if (level == ConnectionStatus.LEVEL_NOTCONNECTED
+                        && ((quick == null && !supervisedReconnect) || "NOPROCESS".equals(raw)))
                     clearStopped();
                 return;
             }
             if (quick != null && !started) return;
             boolean currentProfile = activeProfileId != null && activeProfileId.equals(reportedProfile);
-            if (level == ConnectionStatus.LEVEL_CONNECTED && activeProfileId != null && !currentProfile) return;
+            if (activeProfileId != null && !currentProfile && level != ConnectionStatus.LEVEL_START) return;
             if (quick != null && level != ConnectionStatus.LEVEL_START && !currentProfile) return;
             int check = ++tunnelCheck;
             switch (level) {
@@ -1478,6 +1595,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
                 case LEVEL_NONETWORK:
                 case LEVEL_VPNPAUSED:
                     startedObserved = true;
+                    if (connected) successfulAttempt = false;
                     engineReplied |= level == ConnectionStatus.LEVEL_CONNECTING_SERVER_REPLIED;
                     if (quick != null && !dialStarted && (engineReplied
                             || level == ConnectionStatus.LEVEL_CONNECTING_NO_SERVER_REPLY_YET)) {
@@ -1504,11 +1622,20 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
                     break;
                 case LEVEL_NOTCONNECTED:
                     if (quick != null && started) {
-                        if ("NOPROCESS".equals(raw)) clearStopped();
-                        else attemptFailed("The VPN connection ended.");
+                        if ("NOPROCESS".equals(raw)) {
+                            lastError = "The relay stopped responding.";
+                            message = "Trying another server… " + lastError;
+                            recordFailure();
+                            clearStopped();
+                        } else attemptFailed("The VPN connection ended.");
                     }
-                    else if (startedObserved || connected)
-                        fail(connected ? "The VPN connection ended." : "The relay stopped responding. Try another server.");
+                    else if (startedObserved || connected) {
+                        boolean wasConnected = connected || connectedAt > 0;
+                        started = false;
+                        connected = false;
+                        if (wasConnected) connectionLost("The VPN connection dropped.");
+                        else attemptFailed("The relay stopped responding.");
+                    }
                     return;
                 default:
                     return;
@@ -1519,13 +1646,8 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
 
     private void verifyTunnel(int check,int polls) {
         if (check != tunnelCheck || stopping || !started || isDestroyed()) return;
-        ConnectivityManager connectivity = getSystemService(ConnectivityManager.class);
-        Network network = connectivity == null ? null : connectivity.getActiveNetwork();
-        NetworkCapabilities networkCapabilities = network == null ? null : connectivity.getNetworkCapabilities(network);
-        boolean activeVpn = networkCapabilities != null
-                && networkCapabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
-                && (Build.VERSION.SDK_INT < 30 || networkCapabilities.getOwnerUid() == android.os.Process.myUid());
-        if (activeVpn) {
+        Network network = activeVpnNetwork(this);
+        if (network != null) {
             if (quick != null && quick.country == null && !displayCountry.isEmpty()) {
                 getPreferences(MODE_PRIVATE).edit().putString(LAST_GLOBAL_COUNTRY,displayCountry).apply();
             }
@@ -1533,6 +1655,25 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             connected = true;
             busy = false;
             message = "";
+            if (!successfulAttempt) {
+                successfulAttempt = true;
+                connectedAt = SystemClock.elapsedRealtime();
+                lastError = "";
+                if (endpoint == null) {
+                    SavedConnection saved = SavedConnection.read(this);
+                    if (saved != null && "OpenVPN".equals(saved.entry.protocol)) {
+                        endpoint = saved.entry;
+                        displayName = endpoint.name;
+                        displayCountry = endpoint.country;
+                        resumeConfig = saved.config;
+                    }
+                }
+                history.record(endpoint,"other".equals(attemptNetwork)
+                        ? ConnectionHistory.network(this) : attemptNetwork,true);
+                if (resumeConfig != null) SavedConnection.remember(this,endpoint,resumeConfig);
+                else SavedConnection.clear(this);
+            }
+            cancelReconnect();
             renderState();
             requestVpnNotification();
             return;
@@ -1561,8 +1702,9 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
     private void renderState() {
         if (state == null) return;
         boolean trying = quick != null;
-        transitionText(state,stopping && !trying ? "Disconnecting" : connected && !trying ? "Connected"
-                : busy || trying ? "Connecting" : "Disconnected");
+        transitionText(state,stopping && !trying ? "Disconnecting" : connected && !trying
+                ? wireGuard && !successfulAttempt ? "Tunnel ready" : "Connected"
+                : busy || trying ? supervisedReconnect ? "Reconnecting" : "Connecting" : "Disconnected");
         state.setTextColor(ThemeTransition.color(LIGHT.ink,Color.WHITE,colors.amount()));
         transitionText(detail,!message.isEmpty() ? message : (connected || busy) && !displayName.isEmpty() ? displayName
                 : "Choose a location or connect to a relay.");
@@ -1585,12 +1727,17 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
     private static final class Imported {
         final String name, country, config;
         final File file;
-        Imported(String n,String c,String p,File f) {
-            name = n; country = c; config = p; file = f;
+        final boolean wireGuard;
+        Imported(String n,String c,String p,File f,boolean wireGuard) {
+            name = n; country = c; config = p; file = f; this.wireGuard = wireGuard;
         }
 
-        boolean needsLogin() {
-            return config.contains("\nauth-user-pass\n") || config.startsWith("auth-user-pass\n");
+        boolean needsLogin() { return !wireGuard && usesLogin(config); }
+
+        String protocol() { return wireGuard ? "WireGuard" : "OpenVPN"; }
+
+        ConnectionHistory.Entry entry() {
+            return new ConnectionHistory.Entry("import:" + file.getName(),name,country,protocol());
         }
     }
 
@@ -1603,7 +1750,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         for (File file : files) {
             try (InputStream stream = new AtomicFile(file).openRead()) {
                 JSONObject data = new JSONObject(VpnDirectory.utf8(VpnDirectory.read(stream,200_000)));
-                list.add(new Imported(data.getString("name"),data.getString("country"),data.getString("config"),file));
+                list.add(new Imported(data.getString("name"),data.getString("country"),data.getString("config"),file,data.optBoolean("wireguard")));
             } catch (Exception ignored) {
                 // Skip damaged profiles so other imports remain usable.
             }
@@ -1622,8 +1769,14 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         super.onActivityResult(request,result,data);
         if (request == VPN_PERMISSION && awaitingPermission) {
             awaitingPermission = false;
-            if (result == RESULT_OK) startTunnel();
-            else fail("VPN permission was declined.");
+            if (result == RESULT_OK) {
+                if (pendingWireGuard != null) startWireGuard();
+                else startTunnel();
+            } else {
+                pendingWireGuard = null;
+                wireGuard = false;
+                fail("VPN permission was declined.");
+            }
         }
         if (request == PICK_PROFILE && result == RESULT_OK && data != null && data.getData() != null) {
             importFile(data.getData(),importCountry);
@@ -1642,7 +1795,9 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
                 try (InputStream in = getContentResolver().openInputStream(uri)) {
                     profiles = OpenVpnFiles.read(in,name);
                 }
-                for (OpenVpnFiles.Profile profile : profiles) makeProfile(profile.config,profile.name,"");
+                for (OpenVpnFiles.Profile profile : profiles) {
+                    if (!profile.wireGuard) makeProfile(profile.config,profile.name,"");
+                }
                 for (OpenVpnFiles.Profile profile : profiles) saved.add(saveImport(profile,country));
                 main.post(() -> {
                     if (isDestroyed()) return;
@@ -1650,7 +1805,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
                     expanded.add(country);
                     renderLocations();
                     reveal(locations,7,270,0.7f,0);
-                    toast(saved.size() == 1 ? "OpenVPN profile imported." : saved.size() + " OpenVPN profiles imported.");
+                    toast(saved.size() == 1 ? "VPN profile imported." : saved.size() + " VPN profiles imported.");
                 });
             } catch (Exception error) {
                 for (Imported profile : saved) new AtomicFile(profile.file).delete();
@@ -1658,7 +1813,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
                     if (isDestroyed()) return;
                     String why = error.getMessage();
                     showDialog(dialogBuilder().setTitle("Couldn’t import profile")
-                            .setMessage(why != null && why.length() < 160 ? why : "Choose an OpenVPN .ovpn file or a ZIP of profiles.")
+                            .setMessage(why != null && why.length() < 160 ? why : "Choose an OpenVPN .ovpn file, WireGuard .conf file, or ZIP of profiles.")
                             .setPositiveButton("Done",null).create());
                 });
             }
@@ -1672,7 +1827,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         File file = new File(folder,UUID.randomUUID() + ".json");
         AtomicFile atomic = new AtomicFile(file);
         byte[] bytes = VpnDirectory.utf8(new JSONObject().put("name",profile.name)
-                .put("country",country).put("config",profile.config).toString());
+                .put("country",country).put("config",profile.config).put("wireguard",profile.wireGuard).toString());
         FileOutputStream out = atomic.startWrite();
         try {
             out.write(bytes);
@@ -1681,11 +1836,15 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             atomic.failWrite(out);
             throw error;
         }
-        return new Imported(profile.name,country,profile.config,file);
+        return new Imported(profile.name,country,profile.config,file,profile.wireGuard);
     }
 
     private void connectImport(Imported profile,View opener) {
         if (connectionInProgress()) return;
+        if (profile.wireGuard) {
+            connectWireGuard(profile);
+            return;
+        }
         if (!profile.needsLogin()) {
             connectImport(profile,"","");
             return;
@@ -1710,7 +1869,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
     }
 
     private void connectImport(Imported profile,String username,String password) {
-        loadProfile(profile.name,profile.country,username,password,() -> profile.config,
+        loadProfile(profile.entry(),username,password,() -> profile.config,
                 "Couldn’t start the imported profile.",null);
     }
 
@@ -1722,9 +1881,329 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         bindDialogAction(dialog,AlertDialog.BUTTON_POSITIVE,origin,() -> {
             new AtomicFile(profile.file).delete();
             imported.remove(profile);
+            history.remove(profile.entry());
+            SavedConnection saved = SavedConnection.read(this);
+            if (saved != null && saved.entry.id.equals(profile.entry().id)) SavedConnection.clear(this);
             renderLocations();
             reveal(locations,-4,230,0.75f,0);
         });
+    }
+
+    private void showSaved(boolean favorites,View opener) {
+        List<ConnectionHistory.Entry> entries = favorites ? history.favorites() : history.recent();
+        LinearLayout rows = dialogRows();
+        if (entries.isEmpty()) paragraph(rows,favorites ? "Tap a star beside a server to save it."
+                : "Successful connections will appear here.");
+        AlertDialog dialog = dialogBuilder().setTitle(favorites ? "Favorites" : "Recent connections")
+                .setView(scrollDialog(rows)).setPositiveButton("Done",null).create();
+        DialogMorph.Origin origin = DialogMorph.origin(opener);
+        for (ConnectionHistory.Entry entry : entries) {
+            ServerTile tile = (ServerTile)addTile(rows,entry.name,entry.protocol,"Connect",
+                    view -> closeDialog(dialog,origin,() -> connectSaved(entry,opener)));
+            tile.favorite(entry);
+        }
+        showAnchoredDialog(dialog,origin,true);
+        bindDialogAction(dialog,AlertDialog.BUTTON_POSITIVE,origin,null);
+        bindDialogBack(dialog,() -> closeDialog(dialog,origin,null));
+    }
+
+    private void connectSaved(ConnectionHistory.Entry entry,View opener) {
+        if (connectionInProgress()) return;
+        for (Imported profile : imported) {
+            if (entry.id.equals(profile.entry().id)) {
+                connectImport(profile,opener);
+                return;
+            }
+        }
+        List<VpnDirectory.Relay> relays = listedRelays(entry.country);
+        for (VpnDirectory.Relay relay : relays) {
+            if (entry.id.equals(ConnectionHistory.Entry.relay(relay,entry.name).id)) {
+                connectRelay(relay,entry.name,opener);
+                return;
+            }
+        }
+        if (entry.id.startsWith("provider:PK:")) {
+            pakistanDialog(entry.id.endsWith(":2") ? 2 : 1,opener);
+            return;
+        }
+        toast("This relay is unavailable. Refresh the directory and try again.");
+    }
+
+    private LinearLayout dialogRows() {
+        LinearLayout content = column();
+        content.setPadding(dp(16),dp(6),dp(16),dp(12));
+        return content;
+    }
+
+    private ScrollView scrollDialog(LinearLayout content) {
+        ScrollView scroll = new ScrollView(this);
+        scroll.addView(content,new ScrollView.LayoutParams(-1,-2));
+        return scroll;
+    }
+
+    private void showSplitTunneling(View opener) {
+        DialogMorph.Origin origin = DialogMorph.origin(opener);
+        Set<String> selected = options.excluded();
+        Intent launcher = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER);
+        List<ResolveInfo> apps = getPackageManager().queryIntentActivities(launcher,0);
+        Map<String,String> names = new HashMap<>();
+        for (ResolveInfo app : apps) {
+            String pack = app.activityInfo.packageName;
+            if (!pack.equals(getPackageName())) names.put(pack,app.loadLabel(getPackageManager()).toString());
+        }
+        List<String> packages = new ArrayList<>(names.keySet());
+        packages.sort(Comparator.comparing(name -> names.get(name).toLowerCase(Locale.ROOT)));
+        LinearLayout rows = dialogRows();
+        paragraph(rows,"Select apps to exclude. Changes apply the next time you connect. Android’s kill switch may block excluded apps.");
+        for (String pack : packages) {
+            Switch pick = settingsSwitch(rows,names.get(pack),selected.contains(pack));
+            pick.setOnCheckedChangeListener((button,exclude) -> {
+                if (exclude) selected.add(pack);
+                else selected.remove(pack);
+            });
+        }
+        AlertDialog dialog = dialogBuilder().setTitle("Split tunneling").setView(scrollDialog(rows))
+                .setNegativeButton("Cancel",null).setPositiveButton("Save",null).create();
+        showAnchoredDialog(dialog,origin,true);
+        bindDialogAction(dialog,AlertDialog.BUTTON_POSITIVE,origin,() -> {
+            options.setExcluded(selected);
+            if (connected || busy) toast("Reconnect to apply your split tunneling choices.");
+        });
+        bindDialogAction(dialog,AlertDialog.BUTTON_NEGATIVE,origin,null);
+        bindDialogBack(dialog,() -> closeDialog(dialog,origin,null));
+    }
+
+    private void showKillSwitch(View opener) {
+        DialogMorph.Origin origin = DialogMorph.origin(opener);
+        SavedConnection saved = SavedConnection.read(this);
+        String current = saved == null ? "Connect once to a profile that can reconnect without a password."
+                : "Setu can restore " + saved.entry.name + " when Android starts the VPN.";
+        if (!options.excluded().isEmpty()) current += "\n\nThe kill switch may block apps excluded by split tunneling.";
+        AlertDialog dialog = dialogBuilder().setTitle("Kill switch")
+                .setMessage("In Android’s VPN settings, open Setu VPN’s gear menu. Turn on Always-on VPN and Block connections without VPN.\n\n" + current)
+                .setNegativeButton("Back",null).setPositiveButton("Android VPN settings",null).create();
+        showAnchoredDialog(dialog,origin,true);
+        bindDialogAction(dialog,AlertDialog.BUTTON_POSITIVE,origin,() -> {
+            try { startActivity(new Intent(Settings.ACTION_VPN_SETTINGS)); }
+            catch (Exception ignored) { toast("Open VPN settings in Android Settings."); }
+        });
+        bindDialogAction(dialog,AlertDialog.BUTTON_NEGATIVE,origin,null);
+        bindDialogBack(dialog,() -> closeDialog(dialog,origin,null));
+    }
+
+    private void showConnectionDetails(View opener) {
+        LinearLayout rows = dialogRows();
+        settingsValue(rows,"Status").setText(connected
+                ? wireGuard && !successfulAttempt ? "Awaiting peer" : "Connected"
+                : busy ? "Connecting" : "Disconnected");
+        if (endpoint != null) {
+            settingsValue(rows,"Server").setText(endpoint.name);
+            settingsValue(rows,"Protocol").setText(endpoint.protocol);
+            if (!endpoint.country.isEmpty()) settingsValue(rows,"Country").setText(VpnDirectory.name(endpoint.country));
+        }
+        TextView duration = settingsValue(rows,"Session duration");
+        TextView ip = settingsValue(rows,"VPN exit IP");
+        ip.setText("Not checked");
+        if (!lastError.isEmpty()) paragraph(rows,lastError);
+        TextView check = actionLabel("Check exit IP",14,theme.accent);
+        check.setMinimumHeight(dp(48));
+        check.setGravity(Gravity.CENTER);
+        check.setEnabled(connected && activeVpnNetwork(this) != null);
+        rows.addView(check,new LinearLayout.LayoutParams(-1,-2));
+        paragraph(rows,"Checking uses ipify over the VPN and shares the VPN’s public IP with that service.");
+        AlertDialog dialog = dialogBuilder().setTitle("Connection details").setView(scrollDialog(rows))
+                .setPositiveButton("Done",null).create();
+        DialogMorph.Origin origin = DialogMorph.origin(opener);
+        check.setOnClickListener(view -> checkExitIp(dialog,check,ip));
+        Runnable ticker = new Runnable() {
+            @Override public void run() {
+                if (!dialog.isShowing() || isDestroyed()) return;
+                if (!connected || connectedAt == 0) duration.setText("—");
+                else {
+                    long elapsed = (SystemClock.elapsedRealtime()-connectedAt)/1000;
+                    duration.setText(String.format(Locale.ROOT,"%02d:%02d:%02d",elapsed/3600,(elapsed/60)%60,elapsed%60));
+                }
+                main.postDelayed(this,1000);
+            }
+        };
+        showAnchoredDialog(dialog,origin,true);
+        ticker.run();
+        dialog.setOnDismissListener(d -> main.removeCallbacks(ticker));
+        bindDialogAction(dialog,AlertDialog.BUTTON_POSITIVE,origin,null);
+        bindDialogBack(dialog,() -> closeDialog(dialog,origin,null));
+    }
+
+    private void checkExitIp(AlertDialog dialog,View button,TextView result) {
+        Network network = activeVpnNetwork(this);
+        if (!connected || network == null) {
+            result.setText("VPN unavailable");
+            return;
+        }
+        button.setEnabled(false);
+        result.setText("Checking…");
+        work.execute(() -> {
+            String status = "Unavailable";
+            try {
+                java.net.HttpURLConnection link = (java.net.HttpURLConnection)network.openConnection(
+                        new java.net.URL("https://api64.ipify.org/"));
+                link.setConnectTimeout(4500);
+                link.setReadTimeout(4500);
+                link.setInstanceFollowRedirects(false);
+                try {
+                    if (link.getResponseCode() == 200) {
+                        try (InputStream response = link.getInputStream()) {
+                            String candidate = VpnDirectory.utf8(VpnDirectory.read(response,128)).trim();
+                            if (candidate.matches("[0-9a-fA-F:.]{3,45}") && numericIp(candidate)) status = candidate;
+                        }
+                    }
+                } finally { link.disconnect(); }
+            } catch (Exception ignored) {}
+            String display = status;
+            main.post(() -> {
+                if (!dialog.isShowing() || isDestroyed()) return;
+                boolean same = connected && network.equals(activeVpnNetwork(this));
+                result.setText(same ? display : "VPN changed");
+                button.setEnabled(same);
+            });
+        });
+    }
+
+    private static boolean numericIp(String value) {
+        if (value.indexOf(':') >= 0) {
+            try { return java.net.InetAddress.getByName(value) instanceof java.net.Inet6Address; }
+            catch (java.net.UnknownHostException ignored) { return false; }
+        }
+        String[] parts = value.split("\\.",-1);
+        if (parts.length != 4) return false;
+        for (String part : parts) {
+            if (!part.matches("[0-9]{1,3}") || Integer.parseInt(part) > 255) return false;
+        }
+        return true;
+    }
+
+    static Network activeVpnNetwork(Context context) {
+        ConnectivityManager manager = context.getSystemService(ConnectivityManager.class);
+        if (manager == null) return null;
+        Network network = manager.getActiveNetwork();
+        NetworkCapabilities caps = network == null ? null : manager.getNetworkCapabilities(network);
+        if (caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+                && (Build.VERSION.SDK_INT < 30 || caps.getOwnerUid() == android.os.Process.myUid())) return network;
+        return null;
+    }
+
+    private static boolean usesLogin(String config) {
+        return config.contains("\nauth-user-pass\n") || config.startsWith("auth-user-pass\n");
+    }
+
+    private void connectWireGuard(Imported profile) {
+        endpoint = profile.entry();
+        successfulAttempt = false;
+        lastError = "";
+        wireGuard = true;
+        pendingWireGuard = profile;
+        begin(profile.name,profile.country);
+        try {
+            Intent permission = VpnService.prepare(this);
+            if (permission == null) startWireGuard();
+            else {
+                awaitingPermission = true;
+                startActivityForResult(permission,VPN_PERMISSION);
+            }
+        } catch (RuntimeException error) {
+            pendingWireGuard = null;
+            wireGuard = false;
+            fail("Android couldn’t request VPN permission.");
+        }
+    }
+
+    private void startWireGuard() {
+        Imported profile = pendingWireGuard;
+        pendingWireGuard = null;
+        if (profile == null) return;
+        requestVpnNotification();
+        SetuVpnService.connect(this,profile.entry(),profile.config);
+    }
+
+    private void onWireGuardChanged() {
+        SetuVpnService.Snapshot tunnel = SetuVpnService.snapshot();
+        if (tunnel.state == SetuVpnService.State.IDLE) {
+            if (wireGuard && pendingWireGuard == null && tunnel.request != wireRequest) {
+                wireGuard = false;
+                wireRequest = tunnel.request;
+                clearStopped();
+            }
+            return;
+        }
+        if (tunnel.state == SetuVpnService.State.ERROR) {
+            if (wireGuard || (tunnel.request != wireRequest && !started && !connected
+                    && quick == null && profileTask == null)) {
+                wireRequest = tunnel.request;
+                wireGuard = false;
+                lastError = tunnel.message;
+                fail(tunnel.message);
+            }
+            return;
+        }
+        wireRequest = tunnel.request;
+        wireGuard = true;
+        endpoint = tunnel.entry;
+        displayName = endpoint.name;
+        displayCountry = endpoint.country;
+        started = true;
+        busy = tunnel.state == SetuVpnService.State.STARTING;
+        connected = tunnel.state == SetuVpnService.State.UP;
+        successfulAttempt = tunnel.handshake;
+        connectedAt = tunnel.since;
+        message = tunnel.message;
+        if (tunnel.handshake) lastError = "";
+        renderState();
+    }
+
+    private void connectionLost(String reason) {
+        lastError = reason;
+        if (options.autoReconnect() && resumeConfig != null && endpoint != null
+                && (connectedAt > 0 || supervisedReconnect || restoring) && reconnectCount < 3
+                && VpnService.prepare(this) == null) {
+            supervisedReconnect = true;
+            if (started && !stopping) stop("Reconnecting…");
+            else {
+                busy = true;
+                scheduleReconnect();
+                renderState();
+            }
+        } else {
+            cancelReconnect();
+            if (started || connected) stop(reason);
+            else fail(reason);
+        }
+    }
+
+    private void scheduleReconnect() {
+        main.removeCallbacks(reconnect);
+        message = "Reconnecting… " + lastError;
+        if (foreground) main.postDelayed(reconnect,1500L << reconnectCount);
+    }
+
+    private void resumeOpenVpn() {
+        if (!supervisedReconnect || isDestroyed()) return;
+        if (!foreground || isFinishing()) return;
+        if (!options.autoReconnect() || reconnectCount >= 3 || VpnService.prepare(this) != null) {
+            cancelReconnect();
+            fail(lastError);
+            return;
+        }
+        reconnectCount++;
+        String profile = resumeConfig;
+        ConnectionHistory.Entry entry = endpoint;
+        restoring = true;
+        loadProfile(entry,"","",() -> profile,"The saved OpenVPN profile couldn’t reconnect.",null);
+    }
+
+    private void cancelReconnect() {
+        supervisedReconnect = false;
+        restoring = false;
+        reconnectCount = 0;
+        main.removeCallbacks(reconnect);
     }
 
     private void browse(String link) {

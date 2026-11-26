@@ -13,7 +13,7 @@ rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-andro
 gradle :main:assembleUiOvpn23Release
 ```
 
-The unsigned APK is written to `main/build/outputs/apk/uiOvpn23/release/`. The project compiles the Rust core, Android Java/Kotlin components, and native OpenVPN engine together. The Android application ID is `com.paperline.vpn`. The release version is 1.20, with version code 21.
+The unsigned APK is written to `main/build/outputs/apk/uiOvpn23/release/`. The project compiles the Rust core, Android Java/Kotlin components, and native OpenVPN engine together. The Android application ID is `com.paperline.vpn`. The release version is 1.21, with version code 22.
 
 ## Rust core
 
@@ -41,13 +41,23 @@ The listing text and artwork are under `fastlane/metadata/android/en-US`. The dr
 
 ## Signed GitHub release
 
-The downloadable APK uses the same Setu app source and the pinned F-Droid OpenVPN for Android 0.7.69 engine. The release packaging script is in `release-build/build.sh`. It takes Android SDK Platform 35's `android.jar`, Android Build Tools 35.0.0, ECJ 3.39.0, the verified `de.blinkt.openvpn_225.apk`, the bundled directory JSON, the Android NDK directory, and an output APK path. The script checks the engine APK's SHA-256 and defaults to an unsigned build for local use.
+The downloadable APK uses the same Setu app source and the pinned F-Droid OpenVPN for Android 0.7.69 engine. The release packaging script is in `release-build/build.sh`. It takes Android SDK Platform 35's `android.jar`, Android Build Tools 35.0.0, ECJ 3.39.0, the verified `de.blinkt.openvpn_225.apk`, the bundled directory JSON, the Android NDK directory, the pinned WireGuard tunnel AAR from Maven Central, and an output APK path. The script checks the engine APK's SHA-256 and defaults to an unsigned build for local use.
 
 ```sh
 ./release-build/build.sh /path/to/android.jar /path/to/build-tools/35.0.0 /path/to/ecj.jar \
-    /path/to/de.blinkt.openvpn_225.apk main/src/main/assets/paperline-directory.json /path/to/ndk SetuVPN-1.20.apk
+    /path/to/de.blinkt.openvpn_225.apk main/src/main/assets/paperline-directory.json /path/to/ndk /path/to/tunnel-1.0.20260102.aar SetuVPN-1.21.apk
 ```
 
-To sign with your own keystore, set `PAPERLINE_KEYSTORE`, `PAPERLINE_KEYSTORE_PASSWORD`, and `PAPERLINE_KEY_ALIAS`. The public release uses the original Setu VPN signing key to support updates over 1.19.
+To sign with your own keystore, set `PAPERLINE_KEYSTORE`, `PAPERLINE_KEYSTORE_PASSWORD`, and `PAPERLINE_KEY_ALIAS`. The public release uses the original Setu VPN signing key to support updates over 1.20.
 
 [OpenVPN for Android builds](https://f-droid.org/packages/de.blinkt.openvpn/)
+
+## Connection controls
+
+Tap a star to save a relay or imported profile. **Favorites** and **Recent** let you reconnect to saved entries from the home screen. Quick Connect uses recent outcomes on the current connection type and waits before trying a repeatedly failing relay again. History stays on the device.
+
+**Split tunneling** in Settings lets you exclude apps. Reconnect to apply changes. **Kill switch** opens Android VPN settings, where you can enable Always-on VPN and Block connections without VPN. Android may also block excluded apps when lockdown is on. Setu can restore the last verified profile when Android starts its always-on service. OpenVPN profiles that require account credentials must be connected manually after restart.
+
+Import standalone OpenVPN `.ovpn` files, WireGuard `.conf` files, or ZIPs containing either. The WireGuard status shows when the Android interface is ready and updates to Connected after a peer handshake. Use **Connection details** to view session time and check the exit IP through the active VPN. The IP check sends a request to [ipify](https://www.ipify.org/) only when tapped.
+
+The WireGuard Android tunnel library is provided by WireGuard LLC under the [Apache 2.0 license](main/src/main/assets/licenses/wireguard.txt). Its pinned package is `com.wireguard.android:tunnel:1.0.20260102`. [WireGuard Android source](https://git.zxc4.com/wireguard-android/) · [WireGuard Go source](https://git.zxc4.com/wireguard-go/)

@@ -5,7 +5,7 @@ from zipfile import ZipFile, ZIP_DEFLATED, ZIP_STORED
 import re
 import sys
 
-base, shell, dex, directory, icon, jni, result = map(Path, sys.argv[1:])
+base, shell, dex, directory, icon, jni, wireguard, result = map(Path, sys.argv[1:])
 with ZipFile(shell) as source:
     manifest = bytearray(source.read("AndroidManifest.xml"))
 
@@ -66,9 +66,15 @@ with ZipFile(base) as original, ZipFile(icon) as icon_archive, ZipFile(result, "
     output.writestr("AndroidManifest.xml", manifest, ZIP_DEFLATED)
     indices = [int(m.group(1) or 1) for name in original.namelist()
                if (m := re.fullmatch(r"classes(\d*)\.dex", name))]
-    output.writestr(f"classes{max(indices) + 1}.dex", dex.read_bytes(), ZIP_DEFLATED)
+    for offset, entry in enumerate(sorted(dex.glob("classes*.dex")),max(indices) + 1):
+        output.write(entry,f"classes{offset}.dex",ZIP_DEFLATED)
+    with ZipFile(wireguard) as library:
+        for name in library.namelist():
+            if name.startswith("jni/") and name.endswith("/libwg-go.so"):
+                output.writestr(name.replace("jni/","lib/",1),library.read(name),ZIP_DEFLATED)
     output.writestr("assets/paperline-directory.json", directory.read_bytes(), ZIP_DEFLATED)
     output.writestr("assets/setu-logo.png",brand,ZIP_DEFLATED)
+    output.write(assets / "licenses/wireguard.txt","assets/licenses/wireguard.txt",ZIP_DEFLATED)
     output.write(assets / "paperline-starter.json","assets/paperline-starter.json",ZIP_DEFLATED)
     output.write(assets / "paperline-grokssh.tsv","assets/paperline-grokssh.tsv",ZIP_DEFLATED)
     for font in sorted((assets / "fonts").iterdir()):

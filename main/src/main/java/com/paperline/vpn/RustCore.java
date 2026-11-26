@@ -8,7 +8,7 @@ import java.util.List;
 
 /** Android entry points for the native Setu VPN core. */
 final class RustCore {
-    private static final int RELAY_FIELDS = 7;
+    private static final int RELAY_FIELDS = 8;
 
     static {
         System.loadLibrary("setu_core");
@@ -80,6 +80,11 @@ final class RustCore {
 
     static List<VpnDirectory.Relay> order(List<VpnDirectory.Relay> source,boolean directory,
                                           boolean rotate,String previous,long seed) {
+        return order(source,directory,rotate,previous,seed,java.util.Collections.emptyMap());
+    }
+
+    static List<VpnDirectory.Relay> order(List<VpnDirectory.Relay> source,boolean directory,
+                                        boolean rotate,String previous,long seed,java.util.Map<String,Integer> health) {
         if (source.isEmpty()) return new ArrayList<>();
         long now = System.currentTimeMillis();
         long[] rows = new long[source.size() * RELAY_FIELDS];
@@ -92,6 +97,7 @@ final class RustCore {
             rows[offset++] = relay.speed;
             rows[offset++] = relay.lastSeen;
             rows[offset++] = relay.score;
+            rows[offset++] = health.isEmpty() ? 0 : health.getOrDefault("relay:" + relay.country + ":" + relay.ip,0);
         }
         int[] indices = orderRelays(rows,directory,rotate,countryCode(previous),seed);
         List<VpnDirectory.Relay> result = new ArrayList<>(indices.length);

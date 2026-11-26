@@ -334,7 +334,7 @@ final class VpnDirectory {
         connection.setConnectTimeout(Math.min(6000,timeout));
         connection.setReadTimeout(timeout);
         connection.setInstanceFollowRedirects(false);
-        connection.setRequestProperty("User-Agent", "SetuVPN/1.20");
+        connection.setRequestProperty("User-Agent", "SetuVPN/1.21");
         try {
             if (connection.getResponseCode() != 200) throw new IOException("Directory server unavailable");
             try (InputStream input = connection.getInputStream()) {

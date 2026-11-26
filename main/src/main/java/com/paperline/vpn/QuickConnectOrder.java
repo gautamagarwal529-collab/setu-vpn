@@ -22,32 +22,32 @@ final class QuickConnectOrder {
     private static final int NO_RESPONSE = Integer.MAX_VALUE;
 
     static List<VpnDirectory.Relay> rank(List<VpnDirectory.Relay> source,Set<String> tried,
-                                         boolean global,String previous,long seed) {
+                                         boolean global,String previous,long seed,Map<String,Integer> health) {
         List<VpnDirectory.Relay> candidates = new ArrayList<>(source.size());
         for (VpnDirectory.Relay relay : source) {
             if (!tried.contains(relay.ip)) candidates.add(relay);
         }
-        return RustCore.order(candidates,false,global,previous,seed);
+        return RustCore.order(candidates,false,global,previous,seed,health);
     }
 
-    static void measureFirstCountry(List<VpnDirectory.Relay> order) throws InterruptedException {
+    static void measureFirstCountry(List<VpnDirectory.Relay> order,Map<String,Integer> health) throws InterruptedException {
         if (order.isEmpty()) return;
         String first = order.get(0).country;
         List<VpnDirectory.Relay> local = new ArrayList<>();
         for (VpnDirectory.Relay relay : order) if (first.equals(relay.country)) local.add(relay);
-        measureLatency(local);
+        measureLatency(local,health);
         Iterator<VpnDirectory.Relay> measured = local.iterator();
         for (int i = 0; i < order.size(); i++) {
             if (first.equals(order.get(i).country)) order.set(i,measured.next());
         }
     }
 
-    static void measureLatency(List<VpnDirectory.Relay> ranked) throws InterruptedException {
+    static void measureLatency(List<VpnDirectory.Relay> ranked,Map<String,Integer> health) throws InterruptedException {
         List<VpnDirectory.Relay> checked = new ArrayList<>();
         List<Callable<Integer>> probes = new ArrayList<>();
         for (int i = 0; i < Math.min(PROBE_COUNT, ranked.size()); i++) {
             VpnDirectory.Relay relay = ranked.get(i);
-            if (relay.probePort <= 0) continue;
+            if (relay.probePort <= 0 || health(relay,health) < 0) continue;
             checked.add(relay);
             probes.add(() -> tcpLatency(relay));
         }
@@ -71,7 +71,12 @@ final class QuickConnectOrder {
         }
 
         // Keep the directory order when there was no comparable device measurement.
-        ranked.sort(Comparator.comparingInt(relay -> delays.getOrDefault(relay, NO_RESPONSE - 1)));
+        ranked.sort(Comparator.<VpnDirectory.Relay>comparingInt(relay -> -health(relay,health))
+                .thenComparingInt(relay -> delays.getOrDefault(relay,NO_RESPONSE - 1)));
+    }
+
+    private static int health(VpnDirectory.Relay relay,Map<String,Integer> history) {
+        return history.getOrDefault("relay:" + relay.country + ":" + relay.ip,0);
     }
 
     private static int tcpLatency(VpnDirectory.Relay relay) {

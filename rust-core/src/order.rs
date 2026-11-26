@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::directory::HOUR;
 
 // One input row corresponds to one element of the Java relay list.
-pub(crate) const FIELDS: usize = 7;
+pub(crate) const FIELDS: usize = 8;
 pub(crate) const INDIA: u16 = u16::from_be_bytes(*b"IN");
 
 /// Current relays with a recent TCP response come first, followed by other current relays.
@@ -27,13 +27,14 @@ pub(crate) fn order(
     let mut indices: Vec<_> = (0..rows.len()).collect();
     if directory {
         indices.sort_by_key(|&i| {
-            let [_, _, state, _, _, seen, score] = rows[i];
+            let [_, _, state, _, _, seen, score, _] = rows[i];
             (state, Reverse(seen / (3 * HOUR)), Reverse(score))
         });
     } else {
         indices.sort_by_key(|&i| {
-            let [_, _, state, ping, speed, seen, _] = rows[i];
+            let [_, _, state, ping, speed, seen, _, health] = rows[i];
             (
+                Reverse(health),
                 state,
                 if ping > 0 { ping } else { i32::MAX.into() },
                 Reverse(speed),
@@ -48,7 +49,15 @@ pub(crate) fn order(
         seen.insert((ip, if directory { country } else { 0 }))
     });
     if let Some(seed) = seed {
+        // Cooldown relays remain available as last-resort candidates.
+        let cooling: Vec<_> = indices
+            .iter()
+            .copied()
+            .filter(|&i| rows[i][7] < 0)
+            .collect();
+        indices.retain(|&i| rows[i][7] >= 0);
         indices = rotate(indices, rows, previous, seed);
+        indices.extend(cooling);
     }
     indices
 }
@@ -96,6 +105,14 @@ fn rotate(ranked: Vec<usize>, rows: &[[i64; FIELDS]], previous: u16, seed: u64) 
         countries.swap(0, other);
     }
 
+    // Prefer a known working country whenever there is a different one to try.
+    if let Some(index) = countries.iter().position(|relays| {
+        let first = relays[0];
+        rows[first][7] > 0 && (country(first) != previous || countries.len() == 1)
+    }) {
+        countries.swap(0, index);
+    }
+
     let mut ordered = Vec::with_capacity(ranked.len());
     if !india.is_empty() && previous != INDIA && random.index(25) == 0 {
         ordered.extend(india.pop_front());
@@ -118,22 +135,35 @@ mod tests {
     #[test]
     fn ranking_and_deduplication_match_the_two_callers() {
         let rows = [
-            [1, i64::from(INDIA), 1, 20, 500, 50, 600],
-            [1, 2, 0, 10, 100, 60, 600],
-            [2, 2, 0, 10, 300, 70, 500],
-            [3, 3, 2, 1, 900, 80, 400],
+            [1, i64::from(INDIA), 1, 20, 500, 50, 600, 0],
+            [1, 2, 0, 10, 100, 60, 600, 0],
+            [2, 2, 0, 10, 300, 70, 500, 0],
+            [3, 3, 2, 1, 900, 80, 400, 0],
         ];
         assert_eq!(order(&rows, false, 0, None), [2, 1, 3]);
         assert_eq!(order(&rows, true, 0, None), [1, 2, 0, 3]);
     }
 
     #[test]
+    fn known_good_relays_come_first_and_recent_failures_remain_as_fallbacks() {
+        let rows = [
+            [1, 2, 0, 1, 100, 0, 0, -1],
+            [2, 3, 0, 20, 100, 0, 0, 0],
+            [3, 4, 1, 40, 100, 0, 0, 1],
+        ];
+        assert_eq!(order(&rows, false, 0, None), [2, 1, 0]);
+        assert_eq!(order(&rows, false, 0, Some(5)), [2, 1, 0]);
+        assert_eq!(order(&rows, false, 4, Some(5)), [1, 2, 0]);
+        assert_eq!(order(&rows[..1], false, 0, Some(5)), [0]);
+    }
+
+    #[test]
     fn global_rotation_avoids_repeats_and_prefers_international_relays() {
         let rows = [
-            [1, i64::from(INDIA), 0, 1, 100, 0, 0],
-            [2, 2, 0, 2, 100, 0, 0],
-            [3, 2, 0, 3, 100, 0, 0],
-            [4, 3, 0, 4, 100, 0, 0],
+            [1, i64::from(INDIA), 0, 1, 100, 0, 0, 0],
+            [2, 2, 0, 2, 100, 0, 0, 0],
+            [3, 2, 0, 3, 100, 0, 0, 0],
+            [4, 3, 0, 4, 100, 0, 0, 0],
         ];
         let mut india_first = 0;
         for seed in 0..2048 {

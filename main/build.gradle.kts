@@ -36,8 +36,8 @@ android {
         minSdk = 26
         targetSdk = 35
         //targetSdkPreview = "UpsideDownCake"
-        versionCode = 21
-        versionName = "1.20"
+        versionCode = 22
+        versionName = "1.21"
         externalNativeBuild {
             cmake {
                 //arguments+= "-DCMAKE_VERBOSE_MAKEFILE=1"
@@ -220,6 +220,7 @@ androidComponents {
 }
 
 dependencies {
+    implementation("com.wireguard.android:tunnel:1.0.20260102")
     // https://maven.google.com/web/index.html
     implementation(libs.androidx.annotation)
     implementation(libs.androidx.core.ktx)
