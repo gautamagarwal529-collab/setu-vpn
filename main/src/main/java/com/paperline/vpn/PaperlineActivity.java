@@ -42,6 +42,7 @@ import android.util.LruCache;
 import android.util.SparseArray;
 import android.view.ContextThemeWrapper;
 import android.view.Gravity;
+import android.view.HapticFeedbackConstants;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -92,6 +93,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
@@ -108,6 +110,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
     private static final PathInterpolator EASE = new PathInterpolator(0.22f, 1f, 0.36f, 1f);
     private static final OvershootInterpolator SPRING = new OvershootInterpolator(1.15f);
     private static final int CONNECT_BAR_HEIGHT = 62;
+    private static final int HEADER_HEIGHT = 62;
     private static final int PREVIEW_RELAYS = 12;
     private static final String LAST_GLOBAL_COUNTRY = "last_global_country";
     private static final int PICK_PROFILE = 72;
@@ -126,6 +129,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
     private final Set<String> expanded = new LinkedHashSet<>();
     private final Set<String> showingAllRelays = new LinkedHashSet<>();
     private final Map<String,TextView> countryActions = new HashMap<>();
+    private final Map<String,TextView> lastServerCaptions = new HashMap<>();
     private final List<Imported> imported = new ArrayList<>();
     private final LruCache<String, Bitmap> countryIcons = new LruCache<>(96);
     private Typeface actionTypeface;
@@ -140,13 +144,22 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
     private boolean successfulAttempt, attemptRecorded;
     private int reconnectCount;
     private String lastError = "";
+    private Recovery recovery;
     private final Runnable wireChanges = this::onWireGuardChanged;
     private final Runnable reconnect = this::resumeOpenVpn;
+    private final Runnable sessionTick = this::tickSession;
+    private final Runnable switchCheck = this::finishSwitch;
+    private PendingSwitch pendingSwitch;
     private VpnDirectory.Edition edition = new VpnDirectory.Edition();
     private LinearLayout locations;
     private GlassTheme theme;
     private GlassRefreshScroll scroll;
     private TextView state, detail, action;
+    private TextView sessionClock, disconnectButton, recoveryButton;
+    private LinearLayout sessionActions;
+    private Map<String,ConnectionHistory.Entry> lastByCountry = Collections.emptyMap();
+    private boolean showingSwitchActions;
+    private String markedEndpoint;
     private AlertDialog settings;
     private TextView relayCount, relayCountries, directoryVersion;
     private ConnectionMeter meter;
@@ -211,6 +224,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             if (open != null) expanded.addAll(open);
         }
         history = new ConnectionHistory(this);
+        lastByCountry = history.lastByCountry();
         options = new VpnOptions(this);
         directory = new VpnDirectory(this);
         edition = directory.starter();
@@ -247,6 +261,8 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         statusBound = bindService(new Intent(this,OpenVPNStatusService.class), statusConnection, Context.BIND_AUTO_CREATE);
         advanceQuickConnect();
         if (supervisedReconnect && !started && !stopping && profileTask == null) scheduleReconnect();
+        if (pendingSwitch != null && !stopping) finishSwitch();
+        syncSessionClock();
         animateConnectionMeter();
     }
 
@@ -260,6 +276,8 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         foreground = false;
         SetuVpnService.unlisten(wireChanges);
         main.removeCallbacks(reconnect);
+        main.removeCallbacks(sessionTick);
+        main.removeCallbacks(switchCheck);
         animateConnectionMeter();
         VpnStatus.removeStateListener(this);
         unbindController();
@@ -338,7 +356,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         viewportLayout.bottomMargin = dp(CONNECT_BAR_HEIGHT);
         root.addView(viewport,viewportLayout);
         LinearLayout sheet = column();
-        sheet.setPadding(dp(19),dp(10),dp(19),dp(16));
+        sheet.setPadding(dp(19),dp(6),dp(19),dp(16));
         viewport.addView(sheet,new ScrollView.LayoutParams(-1,-2));
 
         FrameLayout mast = new FrameLayout(this);
@@ -356,8 +374,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         settingsButton.setAutoSizeTextTypeUniformWithConfiguration(11,14,1,android.util.TypedValue.COMPLEX_UNIT_SP);
         settingsButton.setOnClickListener(v -> showSettings(true));
         mast.addView(settingsButton,new FrameLayout.LayoutParams(dp(78),dp(45),Gravity.END | Gravity.CENTER_VERTICAL));
-        sheet.addView(mast,new LinearLayout.LayoutParams(-1,dp(54)));
-        gap(sheet,18);
+        root.addView(mast,new FrameLayout.LayoutParams(-1,dp(HEADER_HEIGHT),Gravity.TOP));
 
         LinearLayout card = column();
         card.setPadding(dp(18),dp(16),dp(18),dp(15));
@@ -380,11 +397,24 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         detail.setGravity(Gravity.CENTER);
         words.addView(detail);
         card.addView(words,new LinearLayout.LayoutParams(-1,-2));
-        TextView detailsButton = actionLabel("Connection details",13,theme.accent);
-        detailsButton.setGravity(Gravity.CENTER);
-        detailsButton.setMinimumHeight(dp(44));
-        detailsButton.setOnClickListener(this::showConnectionDetails);
-        card.addView(detailsButton,new LinearLayout.LayoutParams(-1,-2));
+        words.setOnClickListener(this::showConnectionDetails);
+        words.setFocusable(true);
+        sessionActions = row();
+        sessionActions.setGravity(Gravity.CENTER);
+        sessionClock = text("",13,theme.muted,"sans-serif",Typeface.NORMAL);
+        sessionClock.setTypeface(Typeface.MONOSPACE);
+        sessionClock.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        sessionActions.addView(sessionClock);
+        disconnectButton = actionLabel("Disconnect",13,theme.accent);
+        disconnectButton.setPadding(dp(12),0,dp(12),0);
+        disconnectButton.setMinimumHeight(dp(48));
+        disconnectButton.setOnClickListener(this::endConnection);
+        sessionActions.addView(disconnectButton);
+        card.addView(sessionActions,new LinearLayout.LayoutParams(-1,-2));
+        recoveryButton = actionLabel("",14,theme.accent);
+        recoveryButton.setMinimumHeight(dp(48));
+        recoveryButton.setOnClickListener(this::recoverConnection);
+        card.addView(recoveryButton);
 
         gap(card,11);
         meter = new ConnectionMeter();
@@ -423,19 +453,21 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         });
         sheet.setFocusableInTouchMode(true);
         LinearLayout shortcuts = row();
-        TextView favorites = actionLabel("Favorites",14,theme.accent);
+        TextView favorites = actionLabel("★ Favorites",14,theme.accent);
         TextView recent = actionLabel("Recent",14,theme.accent);
         for (TextView shortcut : new TextView[]{favorites,recent}) {
             shortcut.setGravity(Gravity.CENTER);
-            shortcut.setMinimumHeight(dp(46));
-            shortcuts.addView(shortcut,weighted());
+            shortcut.setMinimumHeight(dp(48));
+            shortcut.setPadding(dp(9),0,dp(13),0);
+            shortcuts.addView(shortcut);
         }
+        favorites.setContentDescription("Favorites");
         favorites.setOnClickListener(view -> showSaved(true,view));
         recent.setOnClickListener(view -> showSaved(false,view));
-        sheet.addView(shortcuts,new LinearLayout.LayoutParams(-1,-2));
         sheet.addView(search,new LinearLayout.LayoutParams(-1,dp(50)));
+        sheet.addView(shortcuts,new LinearLayout.LayoutParams(-1,-2));
         sheet.requestFocus();
-        gap(sheet,12);
+        gap(sheet,2);
         locations = column();
         sheet.addView(locations);
 
@@ -453,7 +485,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         root.addView(dock,new FrameLayout.LayoutParams(-1,dp(CONNECT_BAR_HEIGHT),Gravity.BOTTOM));
         View indicator = viewport.indicator();
         root.addView(indicator,new FrameLayout.LayoutParams(-2,dp(38),Gravity.TOP | Gravity.CENTER_HORIZONTAL));
-        addWindowInsets(root,viewport,dock);
+        addWindowInsets(root,viewport,mast,dock);
 
         setContentView(root);
         root.requestApplyInsets();
@@ -495,7 +527,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         });
     }
 
-    private void addWindowInsets(FrameLayout root,GlassRefreshScroll viewport,FrameLayout dock) {
+    private void addWindowInsets(FrameLayout root,GlassRefreshScroll viewport,View mast,FrameLayout dock) {
         root.setOnApplyWindowInsetsListener((view,insets) -> {
             int top = insets.getSystemWindowInsetTop();
             int bottom = insets.getSystemWindowInsetBottom();
@@ -517,16 +549,24 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             int barHeight = dp(CONNECT_BAR_HEIGHT) + bottom;
             FrameLayout.LayoutParams scrollLayout = (FrameLayout.LayoutParams) viewport.getLayoutParams();
             int reserved = typing ? 0 : barHeight;
-            if (scrollLayout.bottomMargin != reserved) {
+            int headerBottom = top + dp(HEADER_HEIGHT);
+            if (scrollLayout.bottomMargin != reserved || scrollLayout.topMargin != headerBottom) {
                 scrollLayout.bottomMargin = reserved;
+                scrollLayout.topMargin = headerBottom;
                 viewport.setLayoutParams(scrollLayout);
             }
-            viewport.setPadding(left,top,right,typing ? keyboardBottom : 0);
+            viewport.setPadding(left,0,right,typing ? keyboardBottom : 0);
+            FrameLayout.LayoutParams headerLayout = (FrameLayout.LayoutParams) mast.getLayoutParams();
+            if (headerLayout.topMargin != top || headerLayout.leftMargin != left + dp(19)
+                    || headerLayout.rightMargin != right + dp(19)) {
+                headerLayout.setMargins(left + dp(19),top,right + dp(19),0);
+                mast.setLayoutParams(headerLayout);
+            }
             View indicator = viewport.indicator();
             FrameLayout.LayoutParams indicatorLayout = (FrameLayout.LayoutParams) indicator.getLayoutParams();
-            if (indicatorLayout.topMargin != top + dp(6) || indicatorLayout.leftMargin != left
+            if (indicatorLayout.topMargin != headerBottom + dp(6) || indicatorLayout.leftMargin != left
                     || indicatorLayout.rightMargin != right) {
-                indicatorLayout.setMargins(left,top + dp(6),right,0);
+                indicatorLayout.setMargins(left,headerBottom + dp(6),right,0);
                 indicator.setLayoutParams(indicatorLayout);
             }
             FrameLayout.LayoutParams dockLayout = (FrameLayout.LayoutParams) dock.getLayoutParams();
@@ -573,8 +613,10 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
                 else if (requested) toast("Directory refresh failed. Showing the last available list.");
                 if (requested && result != null) scroll.announceForAccessibility("Server directory updated");
                 if (quick != null && quick.rankedEdition == null) {
-                    if (edition.best.isEmpty()) fail("No servers are available right now.");
-                    else advanceQuickConnect();
+                    if (edition.best.isEmpty()) {
+                        recovery = Recovery.REFRESH;
+                        fail("No servers are available right now.");
+                    } else advanceQuickConnect();
                 }
                 renderLocations();
                 updateDirectoryDetails();
@@ -588,21 +630,30 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         if (locations == null) return;
         locations.removeAllViews();
         countryActions.clear();
-        String term = search.getText().toString().trim().toLowerCase(Locale.ROOT);
+        lastServerCaptions.clear();
+        String term = LocationSearch.normalize(search.getText().toString().trim());
         List<String> codes = new ArrayList<>(locationCodes(allCountries || !term.isEmpty()));
-        codes.sort(Comparator.comparingInt((String code) -> listedRelays(code).size()).reversed());
+        Map<String,Integer> matches = new HashMap<>();
+        for (String code : codes) matches.put(code,LocationSearch.match(code,VpnDirectory.name(code),term));
+        codes.removeIf(code -> matches.get(code) == 0);
+        Set<String> readyImports = new LinkedHashSet<>();
+        for (Imported profile : imported) if (!profile.needsLogin()) readyImports.add(profile.country);
+        codes.sort(Comparator.comparingInt((String code) -> listedRelays(code).isEmpty()
+                        && !readyImports.contains(code) ? 1 : 0)
+                .thenComparing(Comparator.comparingInt((String code) -> matches.get(code)).reversed())
+                .thenComparing(Comparator.comparingInt((String code) -> listedRelays(code).size()).reversed()));
         int shown = 0;
         for (String code : codes) {
             String name = VpnDirectory.name(code);
-            if (!term.isEmpty() && !code.equalsIgnoreCase(term) && !name.toLowerCase(Locale.ROOT).contains(term)) continue;
             List<VpnDirectory.Relay> entries = listedRelays(code);
             List<Imported> local = importsFor(code);
-            if (allCountries && entries.isEmpty() && local.isEmpty()) continue;
+            if (allCountries && term.isEmpty() && entries.isEmpty() && local.isEmpty()) continue;
             countryRow(code,name,entries,local);
             shown++;
         }
         List<Imported> uncategorized = importsFor("");
-        if (!uncategorized.isEmpty() && term.isEmpty()) {
+        if (!term.isEmpty()) uncategorized.removeIf(profile -> !LocationSearch.normalize(profile.name).contains(term));
+        if (!uncategorized.isEmpty()) {
             countryRow("", "Imported profiles", Collections.emptyList(), uncategorized);
             shown++;
         }
@@ -654,10 +705,19 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         if (entries.isEmpty() && local.isEmpty()) caption = "PK".equals(code)
                 ? "2 servers · free login required" : "No server listed";
         else {
-            String relayCount = entries.isEmpty() ? "" : entries.size() + (entries.size() == 1 ? " relay listed" : " relays listed");
-            caption = local.isEmpty() ? relayCount : relayCount + (relayCount.isEmpty() ? "" : " · ") + local.size() + " imported";
+            List<String> availability = new ArrayList<>(3);
+            if (!entries.isEmpty()) availability.add(entries.size() + (entries.size() == 1 ? " listed relay" : " listed relays"));
+            long ready = local.stream().filter(profile -> !profile.needsLogin()).count();
+            if (ready > 0) availability.add(ready + (ready == 1 ? " imported profile" : " imported profiles"));
+            if (local.size() > ready) availability.add("Login required");
+            caption = String.join(" · ",availability);
         }
         labels.addView(text(caption,12,theme.muted,"sans-serif",Typeface.NORMAL));
+        TextView lastServer = text("",12,theme.muted,"sans-serif",Typeface.NORMAL);
+        lastServer.setPadding(0,dp(3),0,0);
+        labels.addView(lastServer);
+        lastServerCaptions.put(code,lastServer);
+        showLastServer(code,lastServer);
         heading.addView(labels,weighted());
         TextView arrow = text("›",25,theme.muted,"sans-serif",Typeface.NORMAL);
         arrow.setGravity(Gravity.CENTER);
@@ -665,13 +725,13 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         heading.addView(arrow,new LinearLayout.LayoutParams(dp(27),dp(35)));
         heading.setFocusable(true);
         boolean isOpen = expanded.contains(code);
-        updateCountryHeading(heading,arrow,name,caption,isOpen,false);
+        updateCountryHeading(heading,arrow,name,isOpen,false);
         heading.setOnClickListener(view -> {
             hideKeyboard();
             boolean opening = expanded.add(code);
             boolean fullList = !opening && showingAllRelays.remove(code);
             if (!opening) expanded.remove(code);
-            updateCountryHeading(heading,arrow,name,caption,opening,true);
+            updateCountryHeading(heading,arrow,name,opening,true);
             CountryPanel panel = item.getChildCount() > 1 ? (CountryPanel) item.getChildAt(1) : null;
             if (panel == null && opening) {
                 panel = countryPanel(code,name,entries,local,heading);
@@ -711,13 +771,25 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         return bitmap;
     }
 
-    private void updateCountryHeading(View heading,View arrow,String name,String caption,boolean open,boolean animate) {
-        heading.setContentDescription(name + ". " + caption + ". " + (open ? "Collapse." : "Expand."));
+    private void updateCountryHeading(View heading,View arrow,String name,boolean open,boolean animate) {
+        if (Build.VERSION.SDK_INT >= 30) heading.setStateDescription(open ? "Expanded" : "Collapsed");
+        else heading.setContentDescription(name + (open ? ". Collapse." : ". Expand."));
         float angle = open ? 90f : 0f;
         arrow.animate().cancel();
         if (animate && ValueAnimator.areAnimatorsEnabled()) {
             arrow.animate().rotation(angle).setInterpolator(SPRING).setDuration(310).start();
         } else arrow.setRotation(angle);
+    }
+
+    private void showLastServer(String code,TextView label) {
+        ConnectionHistory.Entry last = lastByCountry.get(code);
+        label.setVisibility(last == null ? View.GONE : View.VISIBLE);
+        if (last != null) label.setText("Last connected · " + last.name);
+    }
+
+    private void updateLastServers() {
+        lastByCountry = history.lastByCountry();
+        lastServerCaptions.forEach(this::showLastServer);
     }
 
     private void returnToHeading(View heading) {
@@ -782,6 +854,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
                     children.removeAllViews();
                     populateCountryPanel(children,code,name,entries,local,heading);
                     children.settle(true,(LinearLayout)children.getParent());
+                    reveal(children,5,205,0.89f,0);
                 });
                 children.addView(more);
             } else if (limit > 0 || !local.isEmpty() || "PK".equals(code)) addHideServers(children,heading);
@@ -809,6 +882,8 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
 
     private final class ServerTile extends LinearLayout {
         private final TextView title, subtitle, action, star;
+        private final boolean connectionAction;
+        private ConnectionHistory.Entry target;
 
         ServerTile(String verb) {
             super(PaperlineActivity.this);
@@ -826,15 +901,19 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             star.setGravity(Gravity.CENTER);
             star.setVisibility(View.GONE);
             addView(star,new LinearLayout.LayoutParams(dp(43),dp(46)));
+            connectionAction = "Connect".equals(verb);
             action = button(verb,false);
             action.setMinimumWidth(dp(75));
+            action.setMinimumHeight(dp(48));
             addView(action);
         }
 
         void favorite(ConnectionHistory.Entry entry) {
+            target = entry;
             star.setVisibility(View.VISIBLE);
             updateStar(entry,history.favorite(entry.id));
             star.setOnClickListener(view -> updateStar(entry,history.toggleFavorite(entry)));
+            refreshVerb();
         }
 
         private void updateStar(ConnectionHistory.Entry entry,boolean saved) {
@@ -846,6 +925,22 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             title.setText(name);
             subtitle.setText(caption);
             action.setOnClickListener(click::accept);
+        }
+
+        void refreshVerb() {
+            if (!connectionAction) return;
+            boolean current = target != null && isCurrent(target);
+            action.setText(current ? "Connected" : connected && !stopping && pendingSwitch == null ? "Switch" : "Connect");
+            action.setEnabled(!current);
+            action.setContentDescription(action.getText() + " · " + title.getText());
+        }
+    }
+
+    private void refreshServerActions(View parent) {
+        if (parent instanceof ServerTile) ((ServerTile)parent).refreshVerb();
+        else if (parent instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup)parent;
+            for (int i = 0;i < group.getChildCount();i++) refreshServerActions(group.getChildAt(i));
         }
     }
 
@@ -1126,31 +1221,133 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         }
     }
 
+    private static final class PendingSwitch {
+        final String destination;
+        final Runnable connect;
+        final boolean previousWireGuard;
+        final long previousConnectedAt;
+        long deadline;
+
+        PendingSwitch(String destination,Runnable connect,boolean previousWireGuard,long previousConnectedAt) {
+            this.destination = destination;
+            this.connect = connect;
+            this.previousWireGuard = previousWireGuard;
+            this.previousConnectedAt = previousConnectedAt;
+        }
+    }
+
     private void heroAction(View view) {
-        if (quick != null || connected || busy || started || stopping) {
-            cancelReconnect();
-            SavedConnection.clear(this);
-            if (wireGuard || pendingWireGuard != null) {
-                quick = null;
-                pendingWireGuard = null;
-                awaitingPermission = false;
-                SetuVpnService.disconnect(this);
-                wireGuard = false;
-                clearStopped();
-                return;
-            }
-            quick = null;
-            if (stopping) {
-                message = "Disconnected";
-                renderState();
-            } else stop("Disconnected");
+        if (pendingSwitch == null && connected && !stopping) {
+            int destination = Math.max(0,search.getTop() - dp(8));
+            if (ValueAnimator.areAnimatorsEnabled()) scroll.smoothScrollTo(0,destination);
+            else scroll.scrollTo(0,destination);
+            return;
+        }
+        if (quick != null || busy || started || stopping || pendingSwitch != null) {
+            endConnection(view);
             return;
         }
         List<Imported> ready = new ArrayList<>(imported);
         ready.removeIf(profile -> profile.needsLogin() || profile.wireGuard);
         QuickSession session = new QuickSession(null,ready);
-        if (edition.best.isEmpty() && !ready.isEmpty()) startQuickConnect(session);
-        else withPublicRelayNotice("Quick Connect",view,() -> startQuickConnect(session));
+        Runnable launch = () -> chooseConnection(view,"Quick Connect",() -> startQuickConnect(session));
+        if (edition.best.isEmpty() && !ready.isEmpty()) launch.run();
+        else withPublicRelayNotice("Quick Connect",view,launch);
+    }
+
+    private void endConnection(View view) {
+        connectionHaptic(view,false);
+        pendingSwitch = null;
+        main.removeCallbacks(switchCheck);
+        cancelReconnect();
+        SavedConnection.clear(this);
+        recovery = null;
+        lastError = "";
+        quick = null;
+        if (wireGuard || pendingWireGuard != null) {
+            pendingWireGuard = null;
+            awaitingPermission = false;
+            wireGuard = false;
+            SetuVpnService.disconnect(this);
+            message = "";
+            clearStopped();
+        } else if (stopping) {
+            message = "Disconnected";
+            renderState();
+        } else stop("Disconnected");
+    }
+
+    private void connectionHaptic(View view,boolean connecting) {
+        if (view == null) return;
+        view.performHapticFeedback(Build.VERSION.SDK_INT >= 30
+                ? (connecting ? HapticFeedbackConstants.CONFIRM : HapticFeedbackConstants.CONTEXT_CLICK)
+                : HapticFeedbackConstants.VIRTUAL_KEY);
+    }
+
+    private boolean canChooseDestination() {
+        if (pendingSwitch == null && !busy && !stopping && (!started || connected)) return true;
+        toast("Wait for the current connection or tap Cancel.");
+        return false;
+    }
+
+    private void chooseConnection(View opener,String destination,Runnable connect) {
+        if (!canChooseDestination()) return;
+        hideKeyboard();
+        connectionHaptic(opener,true);
+        if (!connected) {
+            connect.run();
+            return;
+        }
+        pendingSwitch = new PendingSwitch(destination,connect,wireGuard,connectedAt);
+        cancelReconnect();
+        SavedConnection.clear(this);
+        recovery = null;
+        lastError = "";
+        String switching = "Switching to " + destination + "…";
+        if (wireGuard) {
+            wireGuard = false;
+            SetuVpnService.disconnect(this);
+            message = switching;
+            clearStopped();
+        } else stop(switching);
+    }
+
+    private void finishSwitch() {
+        PendingSwitch request = pendingSwitch;
+        if (request == null || !foreground || stopping || isDestroyed()) return;
+        long now = SystemClock.elapsedRealtime();
+        if (request.deadline == 0) request.deadline = now + 5000;
+        if (ownsActiveTunnel()) {
+            if (now < request.deadline) {
+                main.postDelayed(switchCheck,150);
+                return;
+            }
+            pendingSwitch = null;
+            wireGuard = request.previousWireGuard;
+            connectedAt = request.previousConnectedAt;
+            busy = false;
+            started = true;
+            connected = true;
+            message = "Couldn’t switch to " + request.destination + ". The previous tunnel is still active.";
+            renderState();
+            return;
+        }
+        pendingSwitch = null;
+        busy = false;
+        request.connect.run();
+    }
+
+    private boolean ownsActiveTunnel() {
+        if (activeVpnNetwork(this) != null) return true;
+        if (Build.VERSION.SDK_INT < 30) return false;
+        ConnectivityManager manager = getSystemService(ConnectivityManager.class);
+        if (manager == null) return false;
+        for (Network network : manager.getAllNetworks()) {
+            NetworkCapabilities caps = manager.getNetworkCapabilities(network);
+            if (caps != null && caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)
+                    && caps.getOwnerUid() == android.os.Process.myUid()) return true;
+        }
+        return false;
     }
 
     private boolean ownsCountryAction(String code) {
@@ -1160,17 +1357,18 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
 
     private void countryQuickAction(String code,View view) {
         if (ownsCountryAction(code)) {
-            heroAction(view);
+            endConnection(view);
             return;
         }
-        if (connectionInProgress()) return;
+        if (!canChooseDestination()) return;
         List<Imported> ready = importsFor(code);
         ready.removeIf(profile -> profile.needsLogin() || profile.wireGuard);
         QuickSession session = new QuickSession(code,ready);
         String name = VpnDirectory.name(code);
+        Runnable launch = () -> chooseConnection(view,name,() -> startQuickConnect(session));
         if (!session.servers(edition).isEmpty()) {
-            withPublicRelayNotice("Quick Connect to " + name,view,() -> startQuickConnect(session));
-        } else if (!ready.isEmpty()) startQuickConnect(session);
+            withPublicRelayNotice((connected ? "Switch to " : "Quick Connect to ") + name,view,launch);
+        } else if (!ready.isEmpty()) launch.run();
         else showAnchoredDialog(dialogBuilder().setTitle("No ready servers for " + name)
                     .setMessage("Pull down at the top to refresh the directory, or use Settings to import an OpenVPN profile.")
                     .setPositiveButton("Done",null).create(),DialogMorph.origin(view),true);
@@ -1178,6 +1376,8 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
 
     private void startQuickConnect(QuickSession session) {
         quick = session;
+        recovery = null;
+        lastError = "";
         busy = true;
         message = session.country == null ? "Choosing a server…"
                 : "Finding the fastest server in " + VpnDirectory.name(session.country) + "…";
@@ -1220,8 +1420,9 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             connectImport(profile,"","");
             return;
         }
-        fail(session.country == null ? "Couldn’t connect to any listed server. Refresh and try again."
-                : "Couldn’t connect in " + VpnDirectory.name(session.country) + ". Refresh and try again.");
+        recovery = Recovery.REFRESH;
+        fail(session.country == null ? "None of the listed servers connected."
+                : "No servers connected in " + VpnDirectory.name(session.country) + ".");
     }
 
     private void rankQuickServers(QuickSession session,VpnDirectory.Edition snapshot,List<VpnDirectory.Relay> servers) {
@@ -1252,9 +1453,10 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
     }
 
     private void connectRelay(VpnDirectory.Relay relay,String name,View view) {
-        if (connectionInProgress()) return;
-        withPublicRelayNotice("Connect to " + VpnDirectory.name(relay.country) + "?",view,() ->
-                loadRelay(relay,name));
+        if (!canChooseDestination()) return;
+        if (isCurrent(ConnectionHistory.Entry.relay(relay,name))) return;
+        withPublicRelayNotice((connected ? "Switch to " : "Connect to ") + VpnDirectory.name(relay.country) + "?",view,
+                () -> chooseConnection(view,name,() -> loadRelay(relay,name)));
     }
 
     private void loadRelay(VpnDirectory.Relay relay,String name) {
@@ -1270,7 +1472,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         DialogMorph.Origin origin = DialogMorph.origin(view);
         AlertDialog dialog = dialogBuilder().setTitle(title)
                 .setMessage("Setu VPN uses public VPN Gate relays. VPN Gate records connection logs. Relay operators can record packet headers.")
-                .setNegativeButton("Cancel",null).setPositiveButton("Connect",null).create();
+                .setNegativeButton("Cancel",null).setPositiveButton(connected ? "Switch" : "Connect",null).create();
         showAnchoredDialog(dialog,origin,true);
         bindDialogAction(dialog,AlertDialog.BUTTON_POSITIVE,origin,() -> {
             getPreferences(MODE_PRIVATE).edit().putBoolean("public_notice",true).apply();
@@ -1279,7 +1481,10 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
     }
 
     private void pakistanDialog(int server,View opener) {
-        if (connectionInProgress()) return;
+        if (!canChooseDestination()) return;
+        ConnectionHistory.Entry target = new ConnectionHistory.Entry(
+                "provider:PK:" + server,"Pakistan " + server,"PK","OpenVPN");
+        if (isCurrent(target)) return;
         LinearLayout fields = column();
         fields.setPadding(dp(22),dp(6),dp(22),0);
         EditText username = new EditText(inputContext());
@@ -1295,7 +1500,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
                 .setMessage("Use your free VPN Jantit login.")
                 .setView(fields).setNegativeButton("Cancel",null)
                 .setNeutralButton("Get free login",null)
-                .setPositiveButton("Connect",null).create();
+                .setPositiveButton(connected ? "Switch" : "Connect",null).create();
         DialogMorph.Origin origin = DialogMorph.origin(opener);
         showAnchoredDialog(dialog,origin,true);
         bindDialogAction(dialog,AlertDialog.BUTTON_NEUTRAL,origin,
@@ -1307,9 +1512,9 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
                 toast("Enter your VPN username and password.");
                 return;
             }
-            closeDialog(dialog,origin,() -> loadProfile(new ConnectionHistory.Entry("provider:PK:" + server,"Pakistan " + server,"PK","OpenVPN"),user,secret,
+            closeDialog(dialog,origin,() -> chooseConnection(opener,target.name,() -> loadProfile(target,user,secret,
                     () -> VpnDirectory.pakistanProfile(server),"Couldn’t load the Pakistan profile.",
-                    () -> showPakistanImport(server)));
+                    () -> showPakistanImport(server))));
         });
     }
 
@@ -1361,16 +1566,16 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         },PROFILE_TIMEOUT_MS);
     }
 
-    private boolean connectionInProgress() {
-        if (!(connected || busy || started || stopping)) return false;
-        toast("Disconnect the current VPN before choosing another server.");
-        return true;
+    private boolean isCurrent(ConnectionHistory.Entry entry) {
+        return connected && !stopping && endpoint != null && endpoint.id.equals(entry.id);
     }
 
     private int begin(String name,String country) {
         displayName = name;
         displayCountry = country;
-        message = quick == null ? "" : quickAttemptMessage();
+        recovery = null;
+        if (quick == null && !supervisedReconnect) lastError = "";
+        message = quick == null ? "Connecting to " + name + "…" : quickAttemptMessage();
         busy = true;
         stopping = false;
         startedObserved = false;
@@ -1415,7 +1620,10 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
                 renderState();
                 startActivityForResult(permission,VPN_PERMISSION);
             } else startTunnel();
-        } catch (Exception error) { fail("Android could not start the VPN permission request."); }
+        } catch (Exception error) {
+            recovery = Recovery.ALLOW;
+            fail("Android couldn’t open the VPN permission request.");
+        }
     }
 
     private void startTunnel() {
@@ -1427,7 +1635,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
                 waitingForEngine = true;
                 int attempt = connectAttempt;
                 main.postDelayed(() -> {
-                    if (active(attempt) && waitingForEngine) fail("The VPN service took too long to start.");
+                    if (active(attempt) && waitingForEngine) attemptFailed("The VPN service took too long to start.");
                 },4000);
             }
             return;
@@ -1460,14 +1668,19 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             if (!active(attempt) || connected) return;
             if (engineReplied) {
                 main.postDelayed(() -> {
-                    if (active(attempt) && !connected) attemptFailed("Couldn’t finish connecting. Try another server.");
+                    if (active(attempt) && !connected) attemptFailed("The server responded but couldn’t finish connecting.");
                 },NEGOTIATION_GRACE_MS);
-            } else attemptFailed("No response from " + displayName + ". Try another server.");
+            } else attemptFailed(displayName + " didn’t respond in time.");
         },TUNNEL_TIMEOUT_MS);
     }
 
     private void attemptFailed(String reason) {
+        attemptFailed(reason,defaultRecovery());
+    }
+
+    private void attemptFailed(String reason,Recovery action) {
         lastError = reason;
+        recovery = action;
         recordFailure();
         if (quick != null) stop("Trying another server… " + reason);
         else if (supervisedReconnect || restoring) connectionLost(reason);
@@ -1534,13 +1747,16 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
     private void clearStopped() {
         connectAttempt++;
         stopping = false;
-        busy = quick != null;
+        busy = quick != null || pendingSwitch != null;
         started = false;
         connected = false;
         if (!supervisedReconnect) connectedAt = 0;
         startedObserved = false;
         activeProfileId = null;
-        if (quick != null) {
+        if (pendingSwitch != null) {
+            main.removeCallbacks(switchCheck);
+            main.postDelayed(switchCheck,150);
+        } else if (quick != null) {
             main.post(this::advanceQuickConnect);
         } else if (supervisedReconnect) {
             busy = true;
@@ -1574,10 +1790,11 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             if (stopping) {
                 // EXITING can arrive before OpenVPN's native process releases the service.
                 if (level == ConnectionStatus.LEVEL_NOTCONNECTED
-                        && ((quick == null && !supervisedReconnect) || "NOPROCESS".equals(raw)))
+                        && ((quick == null && pendingSwitch == null && !supervisedReconnect) || "NOPROCESS".equals(raw)))
                     clearStopped();
                 return;
             }
+            if (pendingSwitch != null || (profileTask != null && !started)) return;
             if (quick != null && !started) return;
             boolean currentProfile = activeProfileId != null && activeProfileId.equals(reportedProfile);
             if (activeProfileId != null && !currentProfile && level != ConnectionStatus.LEVEL_START) return;
@@ -1606,10 +1823,14 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
                     connected = false;
                     started = true;
                     message = level == ConnectionStatus.LEVEL_NONETWORK ? "Waiting for an internet connection."
-                            : quick == null ? "" : quickAttemptMessage();
+                            : quick == null ? (displayName.isEmpty() ? "" : "Connecting to " + displayName + "…") : quickAttemptMessage();
                     break;
                 case LEVEL_AUTH_FAILED:
-                    if (started || connected) attemptFailed("VPN authentication failed. Check the provider credentials or try another relay.");
+                    if (started || connected) {
+                        boolean edit = canEditCredentials();
+                        attemptFailed(edit ? "The provider rejected the VPN username or password."
+                                : "VPN authentication failed.",edit ? Recovery.EDIT : defaultRecovery());
+                    }
                     return;
                 case LEVEL_WAITING_FOR_USER_INPUT:
                     if (quick != null) {
@@ -1659,6 +1880,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
                 successfulAttempt = true;
                 connectedAt = SystemClock.elapsedRealtime();
                 lastError = "";
+                recovery = null;
                 if (endpoint == null) {
                     SavedConnection saved = SavedConnection.read(this);
                     if (saved != null && "OpenVPN".equals(saved.entry.protocol)) {
@@ -1670,6 +1892,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
                 }
                 history.record(endpoint,"other".equals(attemptNetwork)
                         ? ConnectionHistory.network(this) : attemptNetwork,true);
+                updateLastServers();
                 if (resumeConfig != null) SavedConnection.remember(this,endpoint,resumeConfig);
                 else SavedConnection.clear(this);
             }
@@ -1702,22 +1925,113 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
     private void renderState() {
         if (state == null) return;
         boolean trying = quick != null;
-        transitionText(state,stopping && !trying ? "Disconnecting" : connected && !trying
-                ? wireGuard && !successfulAttempt ? "Tunnel ready" : "Connected"
-                : busy || trying ? supervisedReconnect ? "Reconnecting" : "Connecting" : "Disconnected");
+        boolean session = connected && pendingSwitch == null && !stopping && !trying;
+        boolean showError = !session && !busy && !stopping && !trying && recovery != null && !lastError.isEmpty();
+        String country = displayCountry.isEmpty() ? "" : VpnDirectory.name(displayCountry);
+        String location = country.isEmpty() ? displayName : country;
+        String heading = session ? wireGuard && !successfulAttempt ? "Tunnel ready"
+                : location.isEmpty() ? "Connected" : "Connected to " + location
+                : pendingSwitch != null ? "Switching location"
+                : stopping && !trying ? "Disconnecting"
+                : busy || trying ? supervisedReconnect ? "Reconnecting" : "Connecting"
+                : showError ? "Couldn’t connect" : "Disconnected";
+        transitionText(state,heading);
         state.setTextColor(ThemeTransition.color(LIGHT.ink,Color.WHITE,colors.amount()));
-        transitionText(detail,!message.isEmpty() ? message : (connected || busy) && !displayName.isEmpty() ? displayName
-                : "Choose a location or connect to a relay.");
-        transitionText(action,trying ? "Cancel" : stopping ? "Disconnecting…" : connected ? "Disconnect"
-                : busy ? "Cancel" : "Quick Connect");
-        action.setEnabled(!stopping || trying);
+        String subtitle = !message.isEmpty() ? message : session ? "Connection details"
+                : busy && !displayName.isEmpty() ? displayName : "Choose a location or use Quick Connect.";
+        transitionText(detail,subtitle);
+        View overview = (View)state.getParent();
+        overview.setClickable(session);
+        overview.setFocusable(session);
+        overview.setContentDescription(session ? heading + ". " + subtitle
+                + ("Connection details".equals(subtitle) ? "" : ". Connection details") : null);
+        sessionActions.setVisibility(session ? View.VISIBLE : View.GONE);
+        recoveryButton.setVisibility(showError ? View.VISIBLE : View.GONE);
+        if (showError) recoveryButton.setText(recovery.label);
+        transitionText(action,trying || pendingSwitch != null ? "Cancel"
+                : stopping ? "Disconnecting…" : session ? "Switch location" : busy ? "Cancel" : "Quick Connect");
+        action.setEnabled(!stopping || trying || pendingSwitch != null);
         countryActions.forEach(this::renderCountryAction);
+        String activeId = session && endpoint != null ? endpoint.id : null;
+        if (showingSwitchActions != session || !Objects.equals(markedEndpoint,activeId)) {
+            showingSwitchActions = session;
+            markedEndpoint = activeId;
+            refreshServerActions(locations);
+        }
+        syncSessionClock();
         animateConnectionMeter();
+    }
+
+    private enum Recovery {
+        NEXT("Try next server"), EDIT("Edit credentials"), RETRY("Try again"),
+        ALLOW("Request VPN permission"), REFRESH("Refresh servers");
+
+        final String label;
+        Recovery(String label) { this.label = label; }
+    }
+
+    private Recovery defaultRecovery() {
+        if (endpoint == null) return Recovery.REFRESH;
+        if (endpoint.id.startsWith("relay:")) return Recovery.NEXT;
+        return Recovery.RETRY;
+    }
+
+    private boolean canEditCredentials() {
+        if (endpoint == null) return false;
+        if (endpoint.id.startsWith("provider:PK:")) return true;
+        for (Imported profile : imported) {
+            if (endpoint.id.equals(profile.entry().id)) return profile.needsLogin();
+        }
+        return false;
+    }
+
+    private void recoverConnection(View opener) {
+        if (recovery == null) return;
+        if (recovery == Recovery.REFRESH) {
+            recovery = null;
+            lastError = "";
+            message = "";
+            renderState();
+            if (ValueAnimator.areAnimatorsEnabled()) scroll.smoothScrollTo(0,0);
+            else scroll.scrollTo(0,0);
+            pullRefresh();
+        } else if (recovery == Recovery.NEXT && endpoint != null) {
+            String id = endpoint.id;
+            String ip = id.substring(id.lastIndexOf(':') + 1);
+            String country = listedRelays(endpoint.country).stream().anyMatch(relay -> !relay.ip.equals(ip))
+                    ? endpoint.country : null;
+            QuickSession session = new QuickSession(country,Collections.emptyList());
+            session.tried.add(ip);
+            withPublicRelayNotice("Try another server",opener,
+                    () -> chooseConnection(opener,"another server",() -> startQuickConnect(session)));
+        } else if (endpoint != null) connectSaved(endpoint,opener);
+        else heroAction(opener);
+    }
+
+    private void syncSessionClock() {
+        main.removeCallbacks(sessionTick);
+        tickSession();
+    }
+
+    private void tickSession() {
+        if (sessionClock == null) return;
+        boolean running = connected && !stopping && pendingSwitch == null && successfulAttempt && connectedAt != 0;
+        sessionClock.setVisibility(running ? View.VISIBLE : View.GONE);
+        if (!running) return;
+        sessionClock.setText(sessionDuration());
+        if (foreground) main.postDelayed(sessionTick,1000);
+    }
+
+    private String sessionDuration() {
+        if (!connected || !successfulAttempt || connectedAt == 0) return "—";
+        long elapsed = Math.max(0,SystemClock.elapsedRealtime() - connectedAt) / 1000;
+        return String.format(Locale.ROOT,"%02d:%02d:%02d",elapsed/3600,(elapsed/60)%60,elapsed%60);
     }
 
     private void renderCountryAction(String code,TextView toggle) {
         boolean active = ownsCountryAction(code);
-        String label = !active ? "Quick Connect" : quick != null ? "Cancel" : stopping ? "Disconnecting…"
+        String label = !active ? (connected && !stopping && pendingSwitch == null ? "Switch here" : "Quick Connect")
+                : quick != null ? "Cancel" : stopping ? "Disconnecting…"
                 : connected ? "Disconnect" : "Cancel";
         transitionText(toggle,label);
         toggle.setContentDescription(label + " for " + VpnDirectory.name(code));
@@ -1775,6 +2089,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             } else {
                 pendingWireGuard = null;
                 wireGuard = false;
+                recovery = Recovery.ALLOW;
                 fail("VPN permission was declined.");
             }
         }
@@ -1840,13 +2155,13 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
     }
 
     private void connectImport(Imported profile,View opener) {
-        if (connectionInProgress()) return;
+        if (!canChooseDestination() || isCurrent(profile.entry())) return;
         if (profile.wireGuard) {
-            connectWireGuard(profile);
+            chooseConnection(opener,profile.name,() -> connectWireGuard(profile));
             return;
         }
         if (!profile.needsLogin()) {
-            connectImport(profile,"","");
+            chooseConnection(opener,profile.name,() -> connectImport(profile,"",""));
             return;
         }
         LinearLayout fields = column();
@@ -1860,12 +2175,21 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         password.setHint("VPN password");
         password.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
         fields.addView(password);
-        AlertDialog dialog = dialogBuilder().setTitle("Provider login").setView(fields)
-                .setNegativeButton("Cancel",null).setPositiveButton("Connect",null).create();
+        boolean editing = recovery == Recovery.EDIT && endpoint != null && endpoint.id.equals(profile.entry().id);
+        AlertDialog dialog = dialogBuilder().setTitle(editing ? "Edit credentials" : "Provider login").setView(fields)
+                .setNegativeButton("Cancel",null).setPositiveButton(connected ? "Switch" : "Connect",null).create();
         DialogMorph.Origin origin = DialogMorph.origin(opener);
         showAnchoredDialog(dialog,origin,true);
-        bindDialogAction(dialog,AlertDialog.BUTTON_POSITIVE,origin,
-                () -> connectImport(profile,user.getText().toString(),password.getText().toString()));
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            String username = user.getText().toString().trim();
+            String secret = password.getText().toString();
+            if (username.isEmpty() || secret.isEmpty()) {
+                toast("Enter your VPN username and password.");
+                return;
+            }
+            closeDialog(dialog,origin,() -> chooseConnection(opener,profile.name,
+                    () -> connectImport(profile,username,secret)));
+        });
     }
 
     private void connectImport(Imported profile,String username,String password) {
@@ -1882,6 +2206,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             new AtomicFile(profile.file).delete();
             imported.remove(profile);
             history.remove(profile.entry());
+            lastByCountry = history.lastByCountry();
             SavedConnection saved = SavedConnection.read(this);
             if (saved != null && saved.entry.id.equals(profile.entry().id)) SavedConnection.clear(this);
             renderLocations();
@@ -1908,7 +2233,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
     }
 
     private void connectSaved(ConnectionHistory.Entry entry,View opener) {
-        if (connectionInProgress()) return;
+        if (!canChooseDestination() || isCurrent(entry)) return;
         for (Imported profile : imported) {
             if (entry.id.equals(profile.entry().id)) {
                 connectImport(profile,opener);
@@ -2018,11 +2343,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         Runnable ticker = new Runnable() {
             @Override public void run() {
                 if (!dialog.isShowing() || isDestroyed()) return;
-                if (!connected || connectedAt == 0) duration.setText("—");
-                else {
-                    long elapsed = (SystemClock.elapsedRealtime()-connectedAt)/1000;
-                    duration.setText(String.format(Locale.ROOT,"%02d:%02d:%02d",elapsed/3600,(elapsed/60)%60,elapsed%60));
-                }
+                duration.setText(sessionDuration());
                 main.postDelayed(this,1000);
             }
         };
@@ -2112,6 +2433,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         } catch (RuntimeException error) {
             pendingWireGuard = null;
             wireGuard = false;
+            recovery = Recovery.ALLOW;
             fail("Android couldn’t request VPN permission.");
         }
     }
@@ -2136,14 +2458,17 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         }
         if (tunnel.state == SetuVpnService.State.ERROR) {
             if (wireGuard || (tunnel.request != wireRequest && !started && !connected
-                    && quick == null && profileTask == null)) {
+                    && quick == null && pendingSwitch == null && profileTask == null)) {
                 wireRequest = tunnel.request;
                 wireGuard = false;
+                if (tunnel.entry != null) endpoint = tunnel.entry;
                 lastError = tunnel.message;
+                recovery = defaultRecovery();
                 fail(tunnel.message);
             }
             return;
         }
+        boolean firstHandshake = tunnel.handshake && (wireRequest != tunnel.request || !successfulAttempt);
         wireRequest = tunnel.request;
         wireGuard = true;
         endpoint = tunnel.entry;
@@ -2155,12 +2480,17 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         successfulAttempt = tunnel.handshake;
         connectedAt = tunnel.since;
         message = tunnel.message;
-        if (tunnel.handshake) lastError = "";
+        if (tunnel.handshake) {
+            recovery = null;
+            lastError = "";
+            if (firstHandshake) updateLastServers();
+        }
         renderState();
     }
 
     private void connectionLost(String reason) {
         lastError = reason;
+        recovery = defaultRecovery();
         if (options.autoReconnect() && resumeConfig != null && endpoint != null
                 && (connectedAt > 0 || supervisedReconnect || restoring) && reconnectCount < 3
                 && VpnService.prepare(this) == null) {
@@ -2505,7 +2835,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             }
             float initialAlpha = from == 0 ? 0f : getAlpha();
             slide = ValueAnimator.ofInt(from,to);
-            slide.setDuration(open ? 390 : 240);
+            slide.setDuration(open ? 255 : 195);
             slide.setInterpolator(open ? SPRING : EASE);
             slide.addUpdateListener(animation -> {
                 params.height = (int) animation.getAnimatedValue();

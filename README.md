@@ -13,7 +13,7 @@ rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-andro
 gradle :main:assembleUiOvpn23Release
 ```
 
-The unsigned APK is written to `main/build/outputs/apk/uiOvpn23/release/`. The project compiles the Rust core, Android Java/Kotlin components, and native OpenVPN engine together. The Android application ID is `com.paperline.vpn`. The release version is 1.21, with version code 22.
+The unsigned APK is written to `main/build/outputs/apk/uiOvpn23/release/`. The project compiles the Rust core, Android Java/Kotlin components, and native OpenVPN engine together. The Android application ID is `com.paperline.vpn`. The release version is 1.22, with version code 23.
 
 ## Rust core
 
@@ -45,7 +45,7 @@ The downloadable APK uses the same Setu app source and the pinned F-Droid OpenVP
 
 ```sh
 ./release-build/build.sh /path/to/android.jar /path/to/build-tools/35.0.0 /path/to/ecj.jar \
-    /path/to/de.blinkt.openvpn_225.apk main/src/main/assets/paperline-directory.json /path/to/ndk /path/to/tunnel-1.0.20260102.aar SetuVPN-1.21.apk
+    /path/to/de.blinkt.openvpn_225.apk main/src/main/assets/paperline-directory.json /path/to/ndk /path/to/tunnel-1.0.20260102.aar SetuVPN-1.22.apk
 ```
 
 To sign with your own keystore, set `PAPERLINE_KEYSTORE`, `PAPERLINE_KEYSTORE_PASSWORD`, and `PAPERLINE_KEY_ALIAS`. The public release uses the original Setu VPN signing key to support updates over 1.20.
@@ -55,6 +55,8 @@ To sign with your own keystore, set `PAPERLINE_KEYSTORE`, `PAPERLINE_KEYSTORE_PA
 ## Connection controls
 
 Tap a star to save a relay or imported profile. **Favorites** and **Recent** let you reconnect to saved entries from the home screen. Quick Connect uses recent outcomes on the current connection type and waits before trying a repeatedly failing relay again. History stays on the device.
+
+With a tunnel active, use **Switch here** or a server's **Switch** action to connect to a different location. Setu closes the existing tunnel before it starts the next one. The connected card shows the current location, session time, and **Disconnect**. Tap its status for protocol and exit-IP details. Country rows show the last successful connection.
 
 **Split tunneling** in Settings lets you exclude apps. Reconnect to apply changes. **Kill switch** opens Android VPN settings, where you can enable Always-on VPN and Block connections without VPN. Android may also block excluded apps when lockdown is on. Setu can restore the last verified profile when Android starts its always-on service. OpenVPN profiles that require account credentials must be connected manually after restart.
 

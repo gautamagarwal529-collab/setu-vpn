@@ -1,0 +1,5 @@
+Switch locations directly from the server list.
+See the connected location and session timer at a glance.
+Find favorites below search, use country aliases, and see your last successful server by country.
+Recover from connection errors with one relevant action.
+Keep the title pinned and use shorter animations with Android motion settings respected.

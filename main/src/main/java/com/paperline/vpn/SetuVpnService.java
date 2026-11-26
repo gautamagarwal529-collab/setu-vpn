@@ -249,7 +249,7 @@ public final class SetuVpnService extends GoBackend.VpnService {
                     retries = 0;
                     new ConnectionHistory(this).record(request.entry,ConnectionHistory.network(this),true);
                     SavedConnection.remember(this,request.entry,request.config);
-                    publish(new Snapshot(State.UP,request.entry,startedAt,true,"",request.token));
+                    publish(new Snapshot(State.UP,request.entry,SystemClock.elapsedRealtime(),true,"",request.token));
                     updateNotification("Connected · " + request.entry.name);
                 } else {
                     long elapsed = SystemClock.elapsedRealtime() - startedAt;

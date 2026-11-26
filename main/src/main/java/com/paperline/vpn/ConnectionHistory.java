@@ -82,7 +82,14 @@ final class ConnectionHistory {
 
     synchronized void record(Entry entry,String network,boolean success) {
         if (entry == null) return;
-        if (success) remember("recent",entry,MAX_RECENT);
+        if (success) {
+            remember("recent",entry,MAX_RECENT);
+            if (entry.country.matches("[A-Z]{2}")) {
+                try {
+                    preferences.edit().putString("country-" + entry.country,entry.encode().toString()).apply();
+                } catch (org.json.JSONException ignored) {}
+            }
+        }
         if (!entry.id.startsWith("relay:")) return;
         long now = System.currentTimeMillis();
         String key = "health-" + network;
@@ -149,6 +156,21 @@ final class ConnectionHistory {
     List<Entry> favorites() { return entries("favorites"); }
     List<Entry> recent() { return entries("recent"); }
 
+    Map<String,Entry> lastByCountry() {
+        Map<String,Entry> result = new LinkedHashMap<>();
+        for (Entry entry : recent()) {
+            if (!entry.country.isEmpty()) result.putIfAbsent(entry.country,entry);
+        }
+        preferences.getAll().forEach((key,value) -> {
+            if (!key.startsWith("country-") || !(value instanceof String)) return;
+            try {
+                Entry entry = Entry.decode(new JSONObject((String)value));
+                result.put(entry.country,entry);
+            } catch (org.json.JSONException ignored) {}
+        });
+        return result;
+    }
+
     synchronized void remove(Entry entry) {
         favoriteIds.remove(entry.id);
         for (String key : new String[]{"favorites","recent"}) {
@@ -157,6 +179,11 @@ final class ConnectionHistory {
                 write(key,list,"favorites".equals(key) ? MAX_FAVORITES : MAX_RECENT);
             }
         }
+        String countryKey = "country-" + entry.country;
+        try {
+            Entry last = Entry.decode(object(countryKey));
+            if (last.id.equals(entry.id)) preferences.edit().remove(countryKey).apply();
+        } catch (org.json.JSONException ignored) {}
     }
 
     private void remember(String key,Entry entry,int limit) {
