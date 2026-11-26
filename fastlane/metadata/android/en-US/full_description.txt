@@ -1,0 +1,5 @@
+Setu VPN is an Android OpenVPN client with a country-based directory of public volunteer relays. Use Quick Connect across available locations or inside one country. Import standalone OpenVPN profiles or ZIP archives and keep them in the app’s private storage.
+
+The app uses the OpenVPN for Android engine and provides light and true-black themes. Pull down to refresh the relay list. Relay availability and performance change over time.
+
+Public relays are operated by third parties. VPN Gate records connection logs, and relay operators can record packet headers. Imported profiles and external providers have their own privacy terms.

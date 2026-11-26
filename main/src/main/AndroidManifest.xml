@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <application android:name="de.blinkt.openvpn.core.ICSOpenVPNApplication"
+        android:allowBackup="false" android:supportsRtl="true"
+        android:usesCleartextTraffic="false" android:label="@string/setu_app_name"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar"
+        android:icon="@drawable/setu_bridge" android:roundIcon="@drawable/setu_bridge">
+        <activity android:name="com.paperline.vpn.PaperlineActivity" android:exported="true"
+            android:launchMode="singleTop" android:configChanges="orientation|screenSize|keyboardHidden"
+            android:enableOnBackInvokedCallback="true"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity-alias android:name="com.paperline.vpn.activities.MainActivity"
+            android:targetActivity="com.paperline.vpn.PaperlineActivity" android:exported="false" />
+        <activity android:name="de.blinkt.openvpn.activities.CredentialsPopup" android:exported="false"
+            android:theme="@style/blinkt.dialog" />
+        <activity-alias android:name="com.paperline.vpn.activities.CredentialsPopup"
+            android:targetActivity="de.blinkt.openvpn.activities.CredentialsPopup" android:exported="false" />
+        <activity android:name="de.blinkt.openvpn.activities.DisconnectVPN" android:exported="false"
+            android:excludeFromRecents="true" android:noHistory="true"
+            android:theme="@android:style/Theme.Material.Light.Dialog" />
+        <activity android:name="de.blinkt.openvpn.LaunchVPN" android:exported="false"
+            android:excludeFromRecents="true" android:noHistory="true"
+            android:theme="@android:style/Theme.Material.Light.Dialog" />
+        <service android:name="de.blinkt.openvpn.core.OpenVPNService"
+            android:exported="true" android:permission="android.permission.BIND_VPN_SERVICE"
+            android:foregroundServiceType="specialUse" android:process=":openvpn">
+            <intent-filter><action android:name="android.net.VpnService" /></intent-filter>
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="vpn" />
+            <meta-data android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON" android:value="false"/>
+        </service>
+        <service android:name="de.blinkt.openvpn.core.OpenVPNStatusService"
+            android:exported="false" android:process=":openvpn" />
+        <service android:name="de.blinkt.openvpn.core.keepVPNAlive"
+            android:permission="android.permission.BIND_JOB_SERVICE"
+            android:exported="true" android:process=":openvpn" />
+    </application>
+</manifest>

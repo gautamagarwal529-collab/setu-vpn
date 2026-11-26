@@ -1,0 +1,32 @@
+Categories:
+  - Internet
+  - VPN & Proxy
+License: GPL-2.0-only
+SourceCode: '<PUBLIC_SOURCE_REPOSITORY_URL>'
+IssueTracker: '<PUBLIC_ISSUE_TRACKER_URL>'
+
+AutoName: Setu VPN
+AntiFeatures:
+  NonFreeNet:
+    en-US: Shows public relay listings and links to external VPN providers. Users can also import OpenVPN profiles. Public VPN Gate relays log connection information and operators can log packet headers.
+
+RepoType: git
+Repo: '<PUBLIC_GIT_URL>'
+
+Builds:
+  - versionName: '1.19'
+    versionCode: 20
+    commit: v1.19
+    subdir: main
+    sudo:
+      - apt-get update
+      - apt-get install -y swig
+    gradle:
+      - ui
+      - ovpn23
+    ndk: 30.0.14904198
+
+AutoUpdateMode: Version
+UpdateCheckMode: Tags
+CurrentVersion: '1.19'
+CurrentVersionCode: 20
