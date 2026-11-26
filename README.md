@@ -1,5 +1,7 @@
 # Setu VPN
 
+[Download the signed Android APK](https://github.com/gautamagarwal529-collab/setu-vpn/releases)
+
 Setu VPN is an Android OpenVPN client with a country-based directory of public relays, global and per-country Quick Connect, and standalone OpenVPN profile imports. Pull down to refresh the directory. Listed servers can go offline or become slow at any time.
 
 ## Build from source
