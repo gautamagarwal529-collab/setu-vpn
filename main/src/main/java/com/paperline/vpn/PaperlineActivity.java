@@ -19,6 +19,7 @@ import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
 import android.graphics.Typeface;
+import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.InsetDrawable;
 import android.net.ConnectivityManager;
@@ -53,11 +54,13 @@ import android.view.animation.LinearInterpolator;
 import android.view.animation.OvershootInterpolator;
 import android.view.animation.PathInterpolator;
 import android.view.inputmethod.InputMethodManager;
+import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.ListView;
 import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
@@ -416,10 +419,12 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         recoveryButton.setOnClickListener(this::recoverConnection);
         card.addView(recoveryButton);
 
-        gap(card,11);
+        gap(card,9);
         meter = new ConnectionMeter();
         colors.bind(meter,night -> meter.invalidate());
-        card.addView(meter,new LinearLayout.LayoutParams(-1,dp(3)));
+        LinearLayout.LayoutParams meterLayout = new LinearLayout.LayoutParams(dp(56),dp(3));
+        meterLayout.gravity = Gravity.CENTER_HORIZONTAL;
+        card.addView(meter,meterLayout);
         sheet.addView(card);
         gap(sheet,16);
 
@@ -452,22 +457,9 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             return true;
         });
         sheet.setFocusableInTouchMode(true);
-        LinearLayout shortcuts = row();
-        TextView favorites = actionLabel("★ Favorites",14,theme.accent);
-        TextView recent = actionLabel("Recent",14,theme.accent);
-        for (TextView shortcut : new TextView[]{favorites,recent}) {
-            shortcut.setGravity(Gravity.CENTER);
-            shortcut.setMinimumHeight(dp(48));
-            shortcut.setPadding(dp(9),0,dp(13),0);
-            shortcuts.addView(shortcut);
-        }
-        favorites.setContentDescription("Favorites");
-        favorites.setOnClickListener(view -> showSaved(true,view));
-        recent.setOnClickListener(view -> showSaved(false,view));
         sheet.addView(search,new LinearLayout.LayoutParams(-1,dp(50)));
-        sheet.addView(shortcuts,new LinearLayout.LayoutParams(-1,-2));
         sheet.requestFocus();
-        gap(sheet,2);
+        gap(sheet,12);
         locations = column();
         sheet.addView(locations);
 
@@ -1093,6 +1085,10 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
 
         gap(content,10);
         LinearLayout actions = settingsCard(content);
+        settingsAction(actions,"Favorites",view -> showSaved(menu,true,view));
+        rule(actions,theme.divider,1,0);
+        settingsAction(actions,"Recent connections",view -> showSaved(menu,false,view));
+        rule(actions,theme.divider,1,0);
         settingsAction(actions,"Import OpenVPN or WireGuard profile",view -> {
             DialogMorph.Origin origin = DialogMorph.origin(view);
             chooseImportCountry(origin);
@@ -1238,9 +1234,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
 
     private void heroAction(View view) {
         if (pendingSwitch == null && connected && !stopping) {
-            int destination = Math.max(0,search.getTop() - dp(8));
-            if (ValueAnimator.areAnimatorsEnabled()) scroll.smoothScrollTo(0,destination);
-            else scroll.scrollTo(0,destination);
+            showSwitchLocation(view);
             return;
         }
         if (quick != null || busy || started || stopping || pendingSwitch != null) {
@@ -1253,6 +1247,151 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         Runnable launch = () -> chooseConnection(view,"Quick Connect",() -> startQuickConnect(session));
         if (edition.best.isEmpty() && !ready.isEmpty()) launch.run();
         else withPublicRelayNotice("Quick Connect",view,launch);
+    }
+
+    private static final class SwitchDestination {
+        final String country, name, caption;
+        final Runnable connect;
+
+        SwitchDestination(String country,String name,String caption,Runnable connect) {
+            this.country = country;
+            this.name = name;
+            this.caption = caption;
+            this.connect = connect;
+        }
+
+        int match(String term) {
+            if (country.isEmpty()) return LocationSearch.normalize(name).contains(term) ? 1 : 0;
+            return Math.max(LocationSearch.match(country,VpnDirectory.name(country),term),
+                    LocationSearch.normalize(name).contains(term) ? 1 : 0);
+        }
+    }
+
+    private List<SwitchDestination> switchDestinations(View opener) {
+        List<SwitchDestination> destinations = new ArrayList<>();
+        edition.countries.forEach((country,relays) -> {
+            String name = VpnDirectory.name(country);
+            String excluded = currentRelayIp(country);
+            if (relays.stream().noneMatch(relay -> !relay.ip.equals(excluded))) return;
+            destinations.add(new SwitchDestination(country,name,excluded.isEmpty() ? "Quick Connect" : "Try a different relay",
+                    () -> switchToCountry(country,opener)));
+        });
+        for (Imported profile : imported) {
+            if (!isCurrent(profile.entry())) {
+                String caption = profile.protocol() + (profile.needsLogin() ? " · Login required" : "");
+                destinations.add(new SwitchDestination(profile.country,profile.name,caption,() -> connectImport(profile,opener)));
+            }
+        }
+        for (int number = 1; number <= 2; number++) {
+            int server = number;
+            String id = "provider:PK:" + server;
+            if (endpoint != null && endpoint.id.equals(id)) continue;
+            destinations.add(new SwitchDestination("PK","Pakistan " + server,"Login required",() -> pakistanDialog(server,opener)));
+        }
+        destinations.sort(Comparator.comparing(
+                (SwitchDestination destination) -> destination.name,String.CASE_INSENSITIVE_ORDER));
+        return destinations;
+    }
+
+    private String currentRelayIp(String country) {
+        String prefix = "relay:" + country + ":";
+        return connected && endpoint != null && endpoint.id.startsWith(prefix)
+                ? endpoint.id.substring(prefix.length()) : "";
+    }
+
+    private void switchToCountry(String country,View opener) {
+        if (!canChooseDestination()) return;
+        QuickSession session = new QuickSession(country,Collections.emptyList());
+        String excluded = currentRelayIp(country);
+        if (!excluded.isEmpty()) session.tried.add(excluded);
+        String name = VpnDirectory.name(country);
+        if (session.servers(edition).stream().noneMatch(relay -> !session.tried.contains(relay.ip))) {
+            toast("No other relay is listed for " + name + ".");
+            return;
+        }
+        withPublicRelayNotice((connected ? "Switch to " : "Connect to ") + name,opener,
+                () -> chooseConnection(opener,name,() -> startQuickConnect(session)));
+    }
+
+    private void showSwitchLocation(View opener) {
+        if (!canChooseDestination()) return;
+        List<SwitchDestination> destinations = switchDestinations(opener);
+        LinearLayout rows = dialogRows();
+        EditText filter = new EditText(inputContext());
+        filter.setHint("Search locations");
+        filter.setSingleLine();
+        filter.setTextSize(15);
+        filter.setPadding(dp(12),0,dp(12),0);
+        colorText(filter,LIGHT.ink,DARK.ink);
+        filter.setHintTextColor(theme.muted);
+        colorGlass(filter,GlassTheme.Surface.CONTROL,18);
+        rows.addView(filter,new LinearLayout.LayoutParams(-1,dp(48)));
+        gap(rows,8);
+
+        Context context = inputContext();
+        ListView list = new ListView(context);
+        list.setSelector(android.R.color.transparent);
+        list.setDivider(null);
+        FrameLayout results = new FrameLayout(this);
+        int height = Math.max(120,Math.min(320,getResources().getConfiguration().screenHeightDp / 2));
+        rows.addView(results,new LinearLayout.LayoutParams(-1,dp(height)));
+        results.addView(list,new FrameLayout.LayoutParams(-1,-1));
+        TextView empty = text("No matching locations.",14,theme.muted,"sans-serif",Typeface.NORMAL);
+        empty.setGravity(Gravity.CENTER);
+        results.addView(empty,new FrameLayout.LayoutParams(-1,-1));
+        ArrayAdapter<SwitchDestination> adapter = new ArrayAdapter<SwitchDestination>(context,android.R.layout.simple_list_item_1) {
+            @Override public View getView(int position,View recycled,ViewGroup parent) {
+                TextView row = (TextView)super.getView(position,recycled,parent);
+                SwitchDestination destination = getItem(position);
+                String label = destination.name + "\n" + destination.caption;
+                android.text.SpannableString copy = new android.text.SpannableString(label);
+                int start = destination.name.length() + 1;
+                copy.setSpan(new android.text.style.RelativeSizeSpan(.78f),start,label.length(),0);
+                copy.setSpan(new android.text.style.ForegroundColorSpan(theme.muted),start,label.length(),0);
+                row.setText(copy);
+                row.setTextColor(theme.ink);
+                row.setTextSize(16);
+                row.setPadding(dp(7),dp(8),dp(7),dp(8));
+                row.setMinHeight(dp(54));
+                BitmapDrawable flag = new BitmapDrawable(getResources(),countryIcon(destination.country));
+                flag.setBounds(0,0,dp(32),dp(28));
+                row.setCompoundDrawablesRelative(flag,null,null,null);
+                row.setCompoundDrawablePadding(dp(12));
+                return row;
+            }
+        };
+        list.setAdapter(adapter);
+        list.setEmptyView(empty);
+        Runnable update = () -> {
+            String term = LocationSearch.normalize(filter.getText().toString());
+            List<SwitchDestination> matching = new ArrayList<>();
+            for (SwitchDestination destination : destinations) if (destination.match(term) > 0) matching.add(destination);
+            matching.sort(Comparator.comparingInt((SwitchDestination destination) -> destination.match(term)).reversed());
+            adapter.setNotifyOnChange(false);
+            adapter.clear();
+            adapter.addAll(matching);
+            adapter.notifyDataSetChanged();
+            list.setSelection(0);
+        };
+        filter.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s,int start,int count,int after) {}
+            @Override public void onTextChanged(CharSequence s,int start,int before,int count) { update.run(); }
+            @Override public void afterTextChanged(Editable s) {}
+        });
+        update.run();
+        rows.setFocusableInTouchMode(true);
+        rows.requestFocus();
+        AlertDialog picker = dialogBuilder().setTitle("Switch location").setView(rows)
+                .setNegativeButton("Cancel",null).create();
+        DialogMorph.Origin origin = DialogMorph.origin(opener);
+        list.setOnItemClickListener((parent,view,position,id) -> {
+            SwitchDestination destination = adapter.getItem(position);
+            if (destination == null) return;
+            InputMethodManager ime = getSystemService(InputMethodManager.class);
+            if (ime != null) ime.hideSoftInputFromWindow(filter.getWindowToken(),0);
+            closeDialog(picker,origin,destination.connect);
+        });
+        showAnchoredDialog(picker,origin,true);
     }
 
     private void endConnection(View view) {
@@ -2214,7 +2353,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         });
     }
 
-    private void showSaved(boolean favorites,View opener) {
+    private void showSaved(AlertDialog menu,boolean favorites,View opener) {
         List<ConnectionHistory.Entry> entries = favorites ? history.favorites() : history.recent();
         LinearLayout rows = dialogRows();
         if (entries.isEmpty()) paragraph(rows,favorites ? "Tap a star beside a server to save it."
@@ -2224,7 +2363,10 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         DialogMorph.Origin origin = DialogMorph.origin(opener);
         for (ConnectionHistory.Entry entry : entries) {
             ServerTile tile = (ServerTile)addTile(rows,entry.name,entry.protocol,"Connect",
-                    view -> closeDialog(dialog,origin,() -> connectSaved(entry,opener)));
+                    view -> closeDialog(dialog,origin,() -> {
+                        menu.dismiss();
+                        connectSaved(entry,settingsButton);
+                    }));
             tile.favorite(entry);
         }
         showAnchoredDialog(dialog,origin,true);
@@ -2577,15 +2719,12 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
     }
 
     private void animateConnectionMeter() {
-        boolean active = connected && !stopping;
-        boolean working = !active && (busy || stopping || quick != null);
-        boolean animate = ValueAnimator.areAnimatorsEnabled();
-        boolean moving = foreground && working && animate;
-        boolean changed = meter.active != active;
-        meter.mode(working,active);
+        MeterState status = connectionMeterState();
+        boolean moving = foreground && status.pulsing && ValueAnimator.areAnimatorsEnabled();
+        meter.setState(status);
         if (moving && connectionMotion == null) {
             connectionMotion = ValueAnimator.ofFloat(0f,1f);
-            connectionMotion.setDuration(1500);
+            connectionMotion.setDuration(1700);
             connectionMotion.setInterpolator(new LinearInterpolator());
             connectionMotion.setRepeatCount(ValueAnimator.INFINITE);
             connectionMotion.addUpdateListener(animation -> meter.setPhase((float) animation.getAnimatedValue()));
@@ -2595,7 +2734,18 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             connectionMotion = null;
             meter.setPhase(0f);
         }
-        if (changed && animate) reveal(meter,0,260,0.5f,0);
+    }
+
+    private MeterState connectionMeterState() {
+        if (pendingSwitch != null) return MeterState.SWITCHING;
+        if (awaitingPermission) return MeterState.PERMISSION;
+        if (stopping) return quick == null ? MeterState.DISCONNECTING : MeterState.SEARCHING;
+        if (connected) return successfulAttempt ? MeterState.CONNECTED : MeterState.AWAITING_PEER;
+        if (supervisedReconnect) return MeterState.RECONNECTING;
+        if (quick != null && !started) return MeterState.SEARCHING;
+        if (busy || started) return MeterState.CONNECTING;
+        if (!lastError.isEmpty() && (recovery != null || lastError.equals(message))) return MeterState.FAILED;
+        return MeterState.IDLE;
     }
 
     private void reveal(View view,int distance,int duration,float startingAlpha,int delay) {
@@ -2765,10 +2915,6 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
 
     private float rim() { return getResources().getDisplayMetrics().density * .8f; }
 
-    private int connectedColor() {
-        return ThemeTransition.color(LIGHT.connected,DARK.connected,colors.amount());
-    }
-
     private void colorText(TextView view,int color) {
         if (color == theme.ink) colorText(view,LIGHT.ink,DARK.ink);
         else if (color == theme.muted) colorText(view,LIGHT.muted,DARK.muted);
@@ -2877,9 +3023,31 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         }
     }
 
+    private enum MeterState {
+        IDLE(0xffa8b6ce,0xff384258,false),
+        SEARCHING(0xff6f52b4,0xffbfacff,true),
+        CONNECTING(0xff235ab4,0xff8cbaff,true),
+        SWITCHING(0xff884583,0xffe3a5df,true),
+        PERMISSION(0xff865805,0xffffce79,true),
+        AWAITING_PEER(0xff327388,0xff8de3f0,true),
+        RECONNECTING(0xffa65522,0xffffb27e,true),
+        DISCONNECTING(0xff59677c,0xffa9b8cc,true),
+        FAILED(0xffb52b38,0xffff707c,false),
+        CONNECTED(LIGHT.connected,DARK.connected,false);
+
+        final int light, dark;
+        final boolean pulsing;
+
+        MeterState(int light,int dark,boolean pulsing) {
+            this.light = light;
+            this.dark = dark;
+            this.pulsing = pulsing;
+        }
+    }
+
     private final class ConnectionMeter extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private boolean working, active;
+        private MeterState state = MeterState.IDLE;
         private float phase;
 
         ConnectionMeter() {
@@ -2887,10 +3055,9 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         }
 
-        void mode(boolean working,boolean active) {
-            if (working == this.working && active == this.active) return;
-            this.working = working;
-            this.active = active;
+        void setState(MeterState state) {
+            if (this.state == state) return;
+            this.state = state;
             invalidate();
         }
 
@@ -2903,14 +3070,14 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             float width = getWidth();
             float height = getHeight();
             float radius = height / 2f;
-            paint.setColor(active ? connectedColor() : ThemeTransition.color(LIGHT.meterTrack,DARK.meterTrack,colors.amount()));
+            int tint = ThemeTransition.color(state.light,state.dark,colors.amount());
+            if (state.pulsing && foreground && ValueAnimator.areAnimatorsEnabled()) {
+                int track = ThemeTransition.color(LIGHT.meterTrack,DARK.meterTrack,colors.amount());
+                float pulse = (float)Math.sin(Math.PI * phase);
+                tint = ThemeTransition.color(track,tint,0.42f + 0.58f * pulse);
+            }
+            paint.setColor(tint);
             canvas.drawRoundRect(0,0,width,height,radius,radius,paint);
-            if (!working) return;
-            float segment = width * 0.30f;
-            float start = (width + segment) * phase - segment;
-            if (!ValueAnimator.areAnimatorsEnabled()) start = 0;
-            paint.setColor(connectedColor());
-            canvas.drawRoundRect(Math.max(0,start),0,Math.min(width,start+segment),height,radius,radius,paint);
         }
     }
 }
