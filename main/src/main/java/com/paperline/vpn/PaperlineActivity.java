@@ -386,16 +386,13 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
 
         LinearLayout words = column();
         words.setGravity(Gravity.CENTER);
-        words.setMinimumHeight(dp(80));
-        LabelText connection = new LabelText("CONNECTION",10,theme.muted);
-        connection.setGravity(Gravity.CENTER);
-        words.addView(connection);
+        words.setMinimumHeight(dp(64));
         state = text("Disconnected",29,Color.WHITE,"sans-serif-medium",Typeface.NORMAL, false);
         colorText(state,LIGHT.ink,Color.WHITE);
         state.setGravity(Gravity.CENTER);
         state.setLetterSpacing(-0.045f);
         words.addView(state);
-        detail = text("Choose a location or connect to a relay.",13,theme.muted,"sans-serif",Typeface.NORMAL);
+        detail = text("",13,theme.muted,"sans-serif",Typeface.NORMAL);
         detail.setPadding(0,dp(4),0,0);
         detail.setGravity(Gravity.CENTER);
         words.addView(detail);
@@ -419,11 +416,11 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         recoveryButton.setOnClickListener(this::recoverConnection);
         card.addView(recoveryButton);
 
-        gap(card,9);
         meter = new ConnectionMeter();
         colors.bind(meter,night -> meter.invalidate());
         LinearLayout.LayoutParams meterLayout = new LinearLayout.LayoutParams(dp(56),dp(3));
         meterLayout.gravity = Gravity.CENTER_HORIZONTAL;
+        meterLayout.topMargin = dp(9);
         card.addView(meter,meterLayout);
         sheet.addView(card);
         gap(sheet,16);
@@ -2076,9 +2073,9 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
                 : showError ? "Couldn’t connect" : "Disconnected";
         transitionText(state,heading);
         state.setTextColor(ThemeTransition.color(LIGHT.ink,Color.WHITE,colors.amount()));
-        String subtitle = !message.isEmpty() ? message : session ? "Connection details"
-                : busy && !displayName.isEmpty() ? displayName : "Choose a location or use Quick Connect.";
+        String subtitle = !message.isEmpty() ? message : session ? "Connection details" : busy ? displayName : "";
         transitionText(detail,subtitle);
+        detail.setVisibility(subtitle.isEmpty() ? View.GONE : View.VISIBLE);
         View overview = (View)state.getParent();
         overview.setClickable(session);
         overview.setFocusable(session);
@@ -2721,6 +2718,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
     private void animateConnectionMeter() {
         MeterState status = connectionMeterState();
         boolean moving = foreground && status.pulsing && ValueAnimator.areAnimatorsEnabled();
+        meter.setVisibility(status == MeterState.IDLE ? View.GONE : View.VISIBLE);
         meter.setState(status);
         if (moving && connectionMotion == null) {
             connectionMotion = ValueAnimator.ofFloat(0f,1f);
@@ -2936,17 +2934,6 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         ThemeTransition.Blended drawable = blendGlass(surface,radius);
         colors.background(view,drawable,drawable::setNight);
         return drawable;
-    }
-
-    private final class LabelText extends TextView {
-        LabelText(String label,int size,int color) {
-            super(PaperlineActivity.this);
-            setText(label);
-            setTextSize(size);
-            setLetterSpacing(.14f);
-            colorText(this,color);
-            setTypeface(Typeface.create("sans-serif-medium",Typeface.NORMAL));
-        }
     }
 
     private final class CountryPanel extends LinearLayout {

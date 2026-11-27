@@ -1,3 +1,4 @@
 The bottom Switch location button opens a searchable picker for countries and imported profiles.
 Find Favorites and Recent connections in Settings.
 The centered connection indicator pulses in different colors for each stage and turns green after the tunnel is verified.
+The idle connection card shows only Disconnected.
