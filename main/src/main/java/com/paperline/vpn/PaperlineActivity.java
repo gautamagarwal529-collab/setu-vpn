@@ -158,8 +158,9 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
     private GlassTheme theme;
     private GlassRefreshScroll scroll;
     private TextView state, detail, action;
-    private TextView sessionClock, disconnectButton, recoveryButton;
-    private LinearLayout sessionActions;
+    private TextView sessionClock, recoveryButton;
+    private View dockControl;
+    private DockActionMenu dockMenu;
     private Map<String,ConnectionHistory.Entry> lastByCountry = Collections.emptyMap();
     private boolean showingSwitchActions;
     private String markedEndpoint;
@@ -277,6 +278,7 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
 
     @Override protected void onStop() {
         foreground = false;
+        dockMenu.close();
         SetuVpnService.unlisten(wireChanges);
         main.removeCallbacks(reconnect);
         main.removeCallbacks(sessionTick);
@@ -290,6 +292,11 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             engineStatus = null;
         }
         super.onStop();
+    }
+
+    @Override public void onBackPressed() {
+        if (dockMenu != null && dockMenu.isShown()) dockMenu.close();
+        else super.onBackPressed();
     }
 
     private void unbindController() {
@@ -399,18 +406,11 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         card.addView(words,new LinearLayout.LayoutParams(-1,-2));
         words.setOnClickListener(this::showConnectionDetails);
         words.setFocusable(true);
-        sessionActions = row();
-        sessionActions.setGravity(Gravity.CENTER);
         sessionClock = text("",13,theme.muted,"sans-serif",Typeface.NORMAL);
         sessionClock.setTypeface(Typeface.MONOSPACE);
+        sessionClock.setGravity(Gravity.CENTER);
         sessionClock.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        sessionActions.addView(sessionClock);
-        disconnectButton = actionLabel("Disconnect",14,theme.accent);
-        disconnectButton.setPadding(dp(14),0,dp(14),0);
-        disconnectButton.setMinimumHeight(dp(50));
-        disconnectButton.setOnClickListener(this::endConnection);
-        sessionActions.addView(disconnectButton);
-        card.addView(sessionActions,new LinearLayout.LayoutParams(-1,-2));
+        card.addView(sessionClock,new LinearLayout.LayoutParams(-1,-2));
         recoveryButton = actionLabel("",14,theme.accent);
         recoveryButton.setMinimumHeight(dp(48));
         recoveryButton.setOnClickListener(this::recoverConnection);
@@ -467,13 +467,53 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         colors.background(dock,dockSurface,dockSurface::setNight);
         action = actionLabel("Quick Connect",16,theme.accent);
         action.setSingleLine(true);
-        action.setPadding(dp(12),0,dp(12),0);
-        action.setMinimumWidth(dp(48));
-        action.setOnClickListener(this::heroAction);
-        dock.addView(action,new FrameLayout.LayoutParams(-2,dp(48),Gravity.CENTER));
+        action.setFocusable(false);
+        action.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        TextView holdHint = text("Hold to disconnect",11,theme.muted,"sans-serif",Typeface.NORMAL);
+        holdHint.setGravity(Gravity.CENTER);
+        holdHint.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        LinearLayout control = column();
+        control.setGravity(Gravity.CENTER);
+        control.setMinimumHeight(dp(52));
+        control.setPadding(dp(12),0,dp(12),0);
+        control.setFocusable(true);
+        control.setOnClickListener(this::heroAction);
+        control.setAccessibilityDelegate(new View.AccessibilityDelegate() {
+            @Override public void onInitializeAccessibilityNodeInfo(View host,
+                    android.view.accessibility.AccessibilityNodeInfo info) {
+                super.onInitializeAccessibilityNodeInfo(host,info);
+                info.setClassName("android.widget.Button");
+                if (host.isLongClickable()) info.addAction(new android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction(
+                        android.view.accessibility.AccessibilityNodeInfo.ACTION_LONG_CLICK,"Show connection actions"));
+            }
+        });
+        control.addView(action,new LinearLayout.LayoutParams(-2,-2));
+        control.addView(holdHint,new LinearLayout.LayoutParams(-2,-2));
+        dockControl = control;
+        dock.addView(control,new FrameLayout.LayoutParams(-2,-2,Gravity.CENTER));
         root.addView(dock,new FrameLayout.LayoutParams(-1,dp(CONNECT_BAR_HEIGHT),Gravity.BOTTOM));
         View indicator = viewport.indicator();
         root.addView(indicator,new FrameLayout.LayoutParams(-2,dp(38),Gravity.TOP | Gravity.CENTER_HORIZONTAL));
+        LinearLayout menu = row();
+        menu.setPadding(dp(5),dp(5),dp(5),dp(5));
+        colorGlass(menu,GlassTheme.Surface.PANEL,24);
+        TextView quickChoice = actionLabel("Quick Connect",14,theme.accent);
+        TextView disconnectChoice = actionLabel("Disconnect",14,theme.ink);
+        for (TextView choice : new TextView[]{quickChoice,disconnectChoice}) {
+            choice.setMinimumHeight(dp(52));
+            choice.setGravity(Gravity.CENTER);
+            menu.addView(choice,new LinearLayout.LayoutParams(0,-2,1));
+        }
+        dockMenu = new DockActionMenu(this,control,menu,quickChoice,disconnectChoice,dp(306));
+        quickChoice.setOnClickListener(view -> {
+            dockMenu.close();
+            quickConnectAction(control);
+        });
+        disconnectChoice.setOnClickListener(view -> {
+            dockMenu.close();
+            if (canDisconnectFromDock()) endConnection(control);
+        });
+        root.addView(dockMenu,new FrameLayout.LayoutParams(-1,-1));
         addWindowInsets(root,viewport,mast,dock);
 
         setContentView(root);
@@ -534,8 +574,10 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
                 keyboardBottom = bottom;
             }
             boolean typing = keyboardBottom > 0 && keyboardBottom >= bottom;
+            if (typing) dockMenu.close();
             dock.setVisibility(typing ? View.GONE : View.VISIBLE);
             int barHeight = dp(CONNECT_BAR_HEIGHT) + bottom;
+            dockMenu.setPadding(left + dp(16),0,right + dp(16),barHeight + dp(8));
             FrameLayout.LayoutParams scrollLayout = (FrameLayout.LayoutParams) viewport.getLayoutParams();
             int reserved = typing ? 0 : barHeight;
             int headerBottom = top + dp(HEADER_HEIGHT);
@@ -1238,11 +1280,23 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
             endConnection(view);
             return;
         }
+        quickConnectAction(view);
+    }
+
+    private void quickConnectAction(View view) {
+        if (!canChooseDestination()) return;
         List<Imported> ready = new ArrayList<>(imported);
-        ready.removeIf(profile -> profile.needsLogin() || profile.wireGuard);
+        ready.removeIf(profile -> profile.needsLogin() || profile.wireGuard || isCurrent(profile.entry()));
         QuickSession session = new QuickSession(null,ready);
+        String excluded = endpoint == null ? "" : currentRelayIp(endpoint.country);
+        if (!excluded.isEmpty()) session.tried.add(excluded);
+        boolean hasRelay = edition.best.stream().anyMatch(relay -> !relay.ip.equals(excluded));
+        if (connected && !hasRelay && ready.isEmpty()) {
+            toast("No other servers are listed.");
+            return;
+        }
         Runnable launch = () -> chooseConnection(view,"Quick Connect",() -> startQuickConnect(session));
-        if (edition.best.isEmpty() && !ready.isEmpty()) launch.run();
+        if (!hasRelay && !ready.isEmpty()) launch.run();
         else withPublicRelayNotice("Quick Connect",view,launch);
     }
 
@@ -1421,9 +1475,17 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
     }
 
     private boolean canChooseDestination() {
-        if (pendingSwitch == null && !busy && !stopping && (!started || connected)) return true;
+        if (canStartFromDock()) return true;
         toast("Wait for the current connection or tap Cancel.");
         return false;
+    }
+
+    private boolean canStartFromDock() {
+        return pendingSwitch == null && !busy && !stopping && (!started || connected);
+    }
+
+    private boolean canDisconnectFromDock() {
+        return pendingSwitch != null || quick != null || !stopping && (busy || started || connected);
     }
 
     private void chooseConnection(View opener,String destination,Runnable connect) {
@@ -2081,12 +2143,14 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         overview.setFocusable(session);
         overview.setContentDescription(session ? heading + (subtitle.isEmpty() ? "" : ". " + subtitle)
                 + ". Connection details" : null);
-        sessionActions.setVisibility(session ? View.VISIBLE : View.GONE);
         recoveryButton.setVisibility(showError ? View.VISIBLE : View.GONE);
         if (showError) recoveryButton.setText(recovery.label);
-        transitionText(action,trying || pendingSwitch != null ? "Cancel"
-                : stopping ? "Disconnecting…" : session ? "Switch location" : busy ? "Cancel" : "Quick Connect");
-        action.setEnabled(!stopping || trying || pendingSwitch != null);
+        String controlLabel = trying || pendingSwitch != null ? "Cancel"
+                : stopping ? "Disconnecting…" : session ? "Switch location" : busy ? "Cancel" : "Quick Connect";
+        transitionText(action,controlLabel);
+        dockControl.setContentDescription(controlLabel + ". Hold to disconnect");
+        dockControl.setEnabled(!stopping || trying || pendingSwitch != null);
+        dockMenu.setAvailability(canStartFromDock(),canDisconnectFromDock());
         countryActions.forEach(this::renderCountryAction);
         String activeId = session && endpoint != null ? endpoint.id : null;
         if (showingSwitchActions != session || !Objects.equals(markedEndpoint,activeId)) {

@@ -1,0 +1,2 @@
+Hold the bottom control and drag to Quick Connect or Disconnect to choose an action.
+The connection card shows the connected location and session timer.
