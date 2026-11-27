@@ -1,0 +1,1 @@
+The timer and slightly larger Disconnect button sit directly below the connected location. Tap the status to open connection details.

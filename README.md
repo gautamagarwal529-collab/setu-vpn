@@ -13,7 +13,7 @@ rustup target add aarch64-linux-android armv7-linux-androideabi i686-linux-andro
 gradle :main:assembleUiOvpn23Release
 ```
 
-The unsigned APK is written to `main/build/outputs/apk/uiOvpn23/release/`. The project compiles the Rust core, Android Java/Kotlin components, and native OpenVPN engine together. The Android application ID is `com.paperline.vpn`. The release version is 1.23, with version code 24.
+The unsigned APK is written to `main/build/outputs/apk/uiOvpn23/release/`. The project compiles the Rust core, Android Java/Kotlin components, and native OpenVPN engine together. The Android application ID is `com.paperline.vpn`. The release version is 1.24, with version code 25.
 
 ## Rust core
 
@@ -45,7 +45,7 @@ The downloadable APK uses the same Setu app source and the pinned F-Droid OpenVP
 
 ```sh
 ./release-build/build.sh /path/to/android.jar /path/to/build-tools/35.0.0 /path/to/ecj.jar \
-    /path/to/de.blinkt.openvpn_225.apk main/src/main/assets/paperline-directory.json /path/to/ndk /path/to/tunnel-1.0.20260102.aar SetuVPN-1.23.apk
+    /path/to/de.blinkt.openvpn_225.apk main/src/main/assets/paperline-directory.json /path/to/ndk /path/to/tunnel-1.0.20260102.aar SetuVPN-1.24.apk
 ```
 
 To sign with your own keystore, set `PAPERLINE_KEYSTORE`, `PAPERLINE_KEYSTORE_PASSWORD`, and `PAPERLINE_KEY_ALIAS`. The public release uses the original Setu VPN signing key to support updates over 1.20.

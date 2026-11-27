@@ -405,9 +405,9 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
         sessionClock.setTypeface(Typeface.MONOSPACE);
         sessionClock.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         sessionActions.addView(sessionClock);
-        disconnectButton = actionLabel("Disconnect",13,theme.accent);
-        disconnectButton.setPadding(dp(12),0,dp(12),0);
-        disconnectButton.setMinimumHeight(dp(48));
+        disconnectButton = actionLabel("Disconnect",14,theme.accent);
+        disconnectButton.setPadding(dp(14),0,dp(14),0);
+        disconnectButton.setMinimumHeight(dp(50));
         disconnectButton.setOnClickListener(this::endConnection);
         sessionActions.addView(disconnectButton);
         card.addView(sessionActions,new LinearLayout.LayoutParams(-1,-2));
@@ -2073,14 +2073,14 @@ public final class PaperlineActivity extends Activity implements VpnStatus.State
                 : showError ? "Couldn’t connect" : "Disconnected";
         transitionText(state,heading);
         state.setTextColor(ThemeTransition.color(LIGHT.ink,Color.WHITE,colors.amount()));
-        String subtitle = !message.isEmpty() ? message : session ? "Connection details" : busy ? displayName : "";
+        String subtitle = !message.isEmpty() ? message : !session && busy ? displayName : "";
         transitionText(detail,subtitle);
         detail.setVisibility(subtitle.isEmpty() ? View.GONE : View.VISIBLE);
         View overview = (View)state.getParent();
         overview.setClickable(session);
         overview.setFocusable(session);
-        overview.setContentDescription(session ? heading + ". " + subtitle
-                + ("Connection details".equals(subtitle) ? "" : ". Connection details") : null);
+        overview.setContentDescription(session ? heading + (subtitle.isEmpty() ? "" : ". " + subtitle)
+                + ". Connection details" : null);
         sessionActions.setVisibility(session ? View.VISIBLE : View.GONE);
         recoveryButton.setVisibility(showError ? View.VISIBLE : View.GONE);
         if (showError) recoveryButton.setText(recovery.label);
